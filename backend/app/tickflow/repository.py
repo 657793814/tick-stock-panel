@@ -1205,8 +1205,9 @@ class KlineRepository:
                                      "volume", "amount", "quote_ts"]
                          if c in df_latest.columns]
             df_hist = guarded_collect(
-                scan_enriched_parquet(self._index_enriched_glob,
-                                cast_options=pl.ScanCastOptions(integer_cast="upcast"))
+                # dtype 兼容统一交给 scan_enriched_parquet（整型 volume 与
+                # UInt32/Int32 连板数要同时容忍），这里不要再覆盖 cast_options。
+                scan_enriched_parquet(self._index_enriched_glob)
                 .filter(pl.col("date") >= start_full)
                 .select(read_cols)
                 .sort(["symbol", "date"]),

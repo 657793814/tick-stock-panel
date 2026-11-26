@@ -50,7 +50,9 @@ def test_build_messages_only_contains_whitelisted_fields():
     for field in ("ma20", "rsi_14", "boll_upper"):
         assert field in field_section
     # 字段清单里出现的每个 key( 都必须在白名单内 (物理列 ∪ 因子)
-    keys = set(re.findall(r"([a-z0-9_]+)\(", field_section))
+    # 只匹配「行首/逗号后的 key(」，避免把中文标签里的括号内容(如 60日(季线))
+    # 误当成字段名。
+    keys = set(re.findall(r"(?:^|,\s*)([a-z0-9_]+)\(", field_section, re.MULTILINE))
     assert keys and keys <= allowed_fields()
 
 

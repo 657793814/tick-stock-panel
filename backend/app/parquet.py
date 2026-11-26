@@ -78,6 +78,28 @@ def scan_daily_parquet(source: Any, **kwargs: Any) -> pl.LazyFrame:
 
 
 def scan_enriched_parquet(source: Any, **kwargs: Any) -> pl.LazyFrame:
-    kwargs.setdefault("schema", ENRICHED_STORAGE_SCHEMA)
-    kwargs.setdefault("cast_options", pl.ScanCastOptions(integer_cast="upcast"))
-    return scan_parquet_compat(source, **kwargs)
+    # 两类历史 dtype 偏差要同时兼容:
+    #   1) volume/amount 声明 Float64, 写入方可能写了 Int64 → 需 allow-float;
+    #   2) 连板/连跌数声明 Int64, 写入方可能写 UInt32/Int32 → upcast 才放行。
+    # Polars 的 integer_cast 一次只能选一种, 因此扫描时把整型计数列按 Float64
+    # 声明(allow-float 对 UInt32/Int32/Int64 全部放行), 扫描后再转回 Int64。
+    _INT_COUNT_COLS = ("consecutive_limit_ups", "consecutive_limit_downs")
+    scan_schema = {
+        name: (pl.Float64 if name in _INT_COUNT_COLS else dtype)
+        for name, dtype in ENRICHED_STORAGE_SCHEMA.items()
+    }
+    kwargs.setdefault("schema", scan_schema)
+    kwargs.setdefault(
+        "cast_options",
+        pl.ScanCastOptions(integer_cast="allow-float", float_cast="upcast"),
+    )
+    lf = scan_parquet_compat(source, **kwargs)
+    # 调用方可能用自定义 schema 的 LazyFrame 桩 (单测) 或缺列的历史分区,
+    # 只对实际存在的计数列回转, 避免凭空造列。
+    present = set(lf.collect_schema().names())
+    casts = [
+        pl.col(name).cast(pl.Int64, strict=False)
+        for name in _INT_COUNT_COLS
+        if name in present
+    ]
+    return lf.with_columns(casts) if casts else lf

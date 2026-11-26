@@ -113,10 +113,10 @@ def test_arena_batch_create_validates_before_writing(tmp_path: Path):
 
 
 def test_arena_batch_create_bounds(tmp_path: Path):
-    """空来源 / 超过 20 个来源 → 400。"""
+    """空来源 / 超过 60 个来源 → 400（上限随多市场对比扩到 60）。"""
     c = _client(tmp_path)
     assert c.post("/api/paper/arena/batch_create", json={"initial_cash": 100000, "sources": []}).status_code == 400
-    many = [{"match_kind": "strategy", "match_id": f"s{i}"} for i in range(21)]
+    many = [{"match_kind": "strategy", "match_id": f"s{i}"} for i in range(61)]
     assert c.post("/api/paper/arena/batch_create", json={"initial_cash": 100000, "sources": many}).status_code == 400
 
 

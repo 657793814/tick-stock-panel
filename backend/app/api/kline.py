@@ -14,6 +14,7 @@ import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.db_safe import is_valid_ext_ident
+from app.api.market_guard import normalize_market
 from app.indicators.pipeline import compute_enriched_single
 from app.market_time import cn_now, cn_today, in_continuous_session
 from app.price_limits import (
@@ -238,6 +239,8 @@ def search_instruments(
     asset_types —— 港美股只有个股，没有独立的 ETF/指数维表。结果附带 market
     字段, 前端据此决定「加入自选」后落在哪个市场。
     """
+    # 直接调用端点函数时 market 还是 FastAPI Query 默认值对象，先归一化
+    market = normalize_market(market)
     from app.markets import ALL_MARKETS
 
     if market not in ALL_MARKETS:

@@ -53,7 +53,7 @@ def _quotes():
     import polars as pl
 
     return pl.DataFrame({
-        "symbol": ["A", "B"],
+        "symbol": ["000001.SZ", "600519.SH"],
         "close": [10.0, 20.0],
         "change_pct": [0.01, -0.02],
     })
@@ -142,9 +142,11 @@ def _first_rule_id(data_dir, account_id) -> str:
 def test_synthetic_rule_events_drive_paper_orders(tmp_path, paper_env, monkeypatch):
     """端到端: sync 注入 → 两轮 evaluate (首轮基线) → 事件带 paper_watch 前缀 →
     paper_auto 按绑定规则建买单; 同时验证公开事件流里看不到沙盒信号。"""
+    # 二开加了账户市场隔离，裸符号 A/B 会被 market_of 兜底判为美股，
+    # 与 CN 账户冲突；这里用真实 A 股代码。
     strat = _FakeStrategyEngine([
-        _result(pool=("A",)),
-        _result(pool=("A", "B"), buys=("B",)),
+        _result(pool=("000001.SZ",)),
+        _result(pool=("000001.SZ", "600519.SH"), buys=("600519.SH",)),
     ])
     engine = MonitorRuleEngine()
     engine.set_strategy_engine(strat)
@@ -160,12 +162,12 @@ def test_synthetic_rule_events_drive_paper_orders(tmp_path, paper_env, monkeypat
     assert events, "第二轮应产生事件"
     assert all(paper_watch.is_paper_watch_event(ev) for ev in events)
     buys = [ev for ev in events if ev["type"] == "buy_signal"]
-    assert {ev["symbol"] for ev in buys} == {"B"}
+    assert {ev["symbol"] for ev in buys} == {"600519.SH"}
 
     created = paper_auto.on_rule_events(tmp_path, events, account_id="acc1")
     assert len(created) == 1
     order = created[0]
-    assert order["symbol"] == "B"
+    assert order["symbol"] == "600519.SH"
     assert order["side"] == "buy"
     assert order["status"] == "pending"  # next_open 次日开盘成交
     # 账户二无启用规则, 不会重复下单

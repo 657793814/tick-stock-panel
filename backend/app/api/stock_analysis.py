@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.api.market_guard import normalize_market
 from app.indicators.levels import compute_levels, summarize_levels
 from app.markets import get_market
 from app.market_time import cn_today
@@ -126,6 +127,8 @@ def get_levels(
         raise HTTPException(400, "symbol 不能为空")
 
     # 市场校验: 港美股按市场注册表路由, 非法市场直接拒绝
+    # 直接调用端点函数时 market 是 FastAPI Query 默认值对象，先归一化
+    market = normalize_market(market)
     market_meta = get_market(market)
     if market_meta is None:
         raise HTTPException(400, f"非法市场: {market}(可选 cn/hk/us)")
