@@ -2,16 +2,18 @@
 
 本项目的几种运行方式，按推荐程度排序。配置项详解见 [configuration.md](./configuration.md)。
 
+> 🍴 本文档对应 [657793814/tick-stock-panel](https://github.com/657793814/tick-stock-panel) fork：镜像/克隆地址均为本 fork。上游 `ghcr.io/shy3130/tick-stock-panel:latest` 与 `shy3130/tick-stock-panel.git` 不含二开改动；若 fork 镜像尚未构建成功，请用方式 B 本地构建。升级基线见 [二次开发与升级基线](./secondary-development.md#0-本仓库二开基线)。
+
 > 📌 前置依赖(仅方式 D 需要):Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`（`npm i -g pnpm`）
 
 ---
 
-## 方式 A:GHCR 现成镜像(免本地构建,多数用户推荐)
+## 方式 A:GHCR 现成镜像(免本地构建,镜像可用时推荐)
 
-GitHub Actions 每次推送都会自动构建多架构镜像(linux/amd64 · arm64)并发布到 GHCR,直接拉取运行,本地无需 Python / Node,也不用现场 build:
+本 fork 推送到 `main` 时由 GitHub Actions 自动构建多架构镜像(linux/amd64 · arm64)并发布到 `ghcr.io/657793814/tick-stock-panel`,直接拉取运行,本地无需 Python / Node,也不用现场 build:
 
 ```bash
-docker run -d --name tsp -p 3018:3018 -e DATA_DIR=/app/data -v "${PWD}/data:/app/data" ghcr.io/shy3130/tick-stock-panel:latest
+docker run -d --name tsp -p 3018:3018 -e DATA_DIR=/app/data -v "${PWD}/data:/app/data" ghcr.io/657793814/tick-stock-panel:latest
 # 打开 http://localhost:3018
 ```
 
@@ -19,15 +21,15 @@ docker run -d --name tsp -p 3018:3018 -e DATA_DIR=/app/data -v "${PWD}/data:/app
 - 自定义绝对数据路径会原样保留,需要把宿主机目录挂载到相同目标。Compose 用户需要同时调整 `environment` 和 `volumes`,仅修改 `.env` 不会覆盖 Compose 中明确指定的路径。
 - 自定义数据源等服务跑在宿主机、容器内需通过 `host.docker.internal` 访问时,Linux 的 `docker run` 要在命令里加 `--add-host=host.docker.internal:host-gateway`(Docker Desktop 的 macOS/Windows 默认已可解析;方式 B 的 compose 已在 `extra_hosts` 配好),否则报 `Name or service not known`。
 - 镜像默认不含 `legacy-cpu` / `backtest` extras —— 老 CPU(无 AVX2)或需要 vectorbt 回测时,请用方式 B 通过 `BACKEND_EXTRAS` 自构建。
-- 跑自己改过的代码:fork 后到仓库 Actions 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
-- 想要 compose 全套挂载(`.env` / `tiers.yaml` / 数据卷):参考根目录 `docker-compose.yml`,把 `build:` 段换成 `image: ghcr.io/shy3130/tick-stock-panel:latest`。
+- 跑自己再改过的代码:fork 本仓库后到 Actions 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
+- 想要 compose 全套挂载(`.env` / `tiers.yaml` / 数据卷):参考根目录 `docker-compose.yml`,把 `build:` 段换成 `image: ghcr.io/657793814/tick-stock-panel:latest`。
 
 更新到新版本:
 
 首次升级、曾使用 `--env-file` 或不确定挂载是否正确时,先完成下方的[数据目录核对与备份](#docker-升级前核对数据目录)。
 
 ```bash
-docker pull ghcr.io/shy3130/tick-stock-panel:latest
+docker pull ghcr.io/657793814/tick-stock-panel:latest
 docker rm -f tsp
 # 重新执行原有的完整 docker run,保留 --env-file、自定义 -e 和原有数据挂载
 ```
@@ -66,7 +68,7 @@ docker compose up --build -d
 由于刚开源近期更新频繁,推荐开发模式运行,可随时 `git pull` 同步最新代码。
 
 ```bash
-git clone https://github.com/shy3130/tick-stock-panel.git
+git clone https://github.com/657793814/tick-stock-panel.git
 cd tick-stock-panel
 cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ./dev.sh                   # Windows: .\dev.ps1
@@ -120,7 +122,7 @@ vectorbt → numba 体积较大,作为可选 extras(`uv sync --extra backtest`)�
 git pull
 ```
 
-> 用方式 A 镜像直跑(无本地仓库)的用户:`docker pull ghcr.io/shy3130/tick-stock-panel:latest` 后删除旧容器重跑;compose 换 `image:` 的用户执行 `docker compose pull && docker compose up -d`。
+> 用方式 A 镜像直跑(无本地仓库)的用户:`docker pull ghcr.io/657793814/tick-stock-panel:latest` 后删除旧容器重跑;compose 换 `image:` 的用户执行 `docker compose pull && docker compose up -d`。
 
 > ⚠️ **方式 A 重建容器时必须保留 `-e DATA_DIR=/app/data` 与原有的宿主机数据目录挂载。** 更换启动目录时,相对的 `${PWD}/data` 也会指向另一份数据;建议使用固定宿主机绝对路径。自定义容器数据目录时,环境变量和挂载目标须一致。
 

@@ -1,7 +1,7 @@
 <div align="center">
 <a id="top"></a>
 
-# <picture><source media="(prefers-color-scheme: dark)" srcset="brand/logo-dark-title.svg"><img src="brand/logo-title.svg" width="30" alt="TSP Logo"></picture> TSP · A股智能量化工作台
+# <picture><source media="(prefers-color-scheme: dark)" srcset="brand/logo-dark-title.svg"><img src="brand/logo-title.svg" width="30" alt="TSP Logo"></picture> TSP · 多市场智能量化工作台（fork 二开版）
 
 <br/>
 
@@ -11,52 +11,39 @@
 [![Node 20+](https://img.shields.io/badge/Node.js-20+-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![React 18](https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
 
-[![Build: Docker CI](https://github.com/shy3130/tick-stock-panel/actions/workflows/docker.yml/badge.svg)](https://github.com/shy3130/tick-stock-panel/actions/workflows/docker.yml)
-[![Test: Backend + Frontend](https://github.com/shy3130/tick-stock-panel/actions/workflows/ci.yml/badge.svg)](https://github.com/shy3130/tick-stock-panel/actions/workflows/ci.yml)
-[![GitHub stars](https://img.shields.io/github/stars/shy3130/tick-stock-panel?style=social)](https://github.com/shy3130/tick-stock-panel/stargazers)
+[![Build: Docker CI](https://github.com/657793814/tick-stock-panel/actions/workflows/docker.yml/badge.svg)](https://github.com/657793814/tick-stock-panel/actions/workflows/docker.yml)
+[![Test: Backend + Frontend](https://github.com/657793814/tick-stock-panel/actions/workflows/ci.yml/badge.svg)](https://github.com/657793814/tick-stock-panel/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/657793814/tick-stock-panel?style=social)](https://github.com/657793814/tick-stock-panel/stargazers)
 
-**自托管 · 零运维 · 核心能力全部开放成接口的 A 股量化工作台**
+**自托管 · 零运维 · 核心能力全部开放成接口的 A 股 / 港股 / 美股量化工作台（fork 二开版）**
 
-[![官网](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-tsp.shy313.com-8B5CF6?style=for-the-badge&labelColor=181717&logo=googlechrome&logoColor=white)](https://tsp.shy313.com/)
-
-`策略` · `回测` · `监控` · `因子挖掘` · `AI 助手` · `Polars` · `React`
-
-<a href="https://trendshift.io/repositories/64327?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-64327" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/64327" alt="shy3130%2Ftick-stock-panel | Trendshift" width="250" height="55"/></a>
-<a href="https://trendshift.io/repositories/64327?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-64327" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/64327/daily?language=TypeScript" alt="shy3130%2Ftick-stock-panel | Trendshift" width="250" height="55"/></a>
+`策略` · `回测` · `监控` · `因子挖掘` · `AI 助手` · `多市场` · `Polars` · `React`
 
 <table>
 <tr><td align="center"><big><b>3.11+</b></big><br/><sub>Python 后端</sub></td>
 <td align="center"><big><b>20+</b></big><br/><sub>Node 前端</sub></td>
 <td align="center"><big><b>18</b></big><br/><sub>React · TypeScript</sub></td>
-<td align="center"><big><b>3000+</b></big><br/><sub>测试全绿 · CI 守护</sub></td>
+<td align="center"><big><b>3000+</b></big><br/><sub>测试用例 · CI 守护</sub></td>
 <td align="center"><big><b>ms 级</b></big><br/><sub>全市场策略扫描</sub></td>
 <td align="center"><big><b>1 容器</b></big><br/><sub>零外部数据库</sub></td></tr>
 </table>
 
-**[✨ 核心功能](#-核心功能)** · **[📸 界面预览](#-界面预览)** · **[🏛️ 架构](#%EF%B8%8F-架构)** · **[⚡ 性能](#-性能)** · **[🌐 开放能力](#-开放能力open-api--mcp)** · **[🚀 快速开始](#-快速开始)** · **[📚 完整文档](#-完整文档)** · **[💬 交流群](#%EF%B8%8F-支持与交流)**
+**[✨ 核心功能](#-核心功能)** · **[📸 界面预览](#-界面预览)** · **[🏛️ 架构](#%EF%B8%8F-架构)** · **[⚡ 性能](#-性能)** · **[🌐 开放能力](#-开放能力open-api--mcp)** · **[🚀 快速开始](#-快速开始)** · **[📚 完整文档](#-完整文档)** · **[💬 联系我](#-支持与交流)**
 
 </div>
 
 ---
 
-<img src="docs/sponsors/sponsor-header.svg" width="240" alt="赞助支持 Sponsor">
-
-
-
-<a href="https://www.runninghub.ai/zh-cn/call-api?source=github&inviteCode=edt5wh7c" target="_blank" rel="noopener noreferrer">
-  <img src="docs/sponsors/runninghub-banner-v8.svg?v=2" alt="RunningHub API — 一个 API Key 直连 400+ 主流大模型" width="100%">
-</a>
-
-**本项目由赞助商 [RunningHub](https://www.runninghub.ai/zh-cn/call-api?source=github&inviteCode=edt5wh7c) 提供支持** · 一个 API Key 直连 400+ 主流大模型 · **[立即免费测试 →](https://www.runninghub.ai/zh-cn/call-api?source=github&inviteCode=edt5wh7c)**
-
-</div>
+> 🍴 本仓库是 [Tick Stock Panel](https://github.com/shy3130/tick-stock-panel) 的二开分支，由 [657793814](https://github.com/657793814) 维护；完整保留上游 MIT 许可与署名，详见 [LICENSE](./LICENSE) 与下方 License 说明。
+>
+> 二开范围以 [架构 · 多市场扩展](#多市场扩展--港美股能力复刻) 和 [二次开发与升级基线](./docs/secondary-development.md#0-本仓库二开基线) 为准；上游官网、赞助与社区入口不属于本 fork 的服务。
 
 ---
 
 > [!IMPORTANT]
 > ⚠️ 本项目谨作为本地量化提供解决思路与方案，**不作为投资软件或者看盘软件**。**明确不做**：不对标同花顺 / 通达信，不内置「AI 荐股 / 涨停预测」。数据源已插件化，可任意接入第三方数据源。仅供学习研究使用。
 
-📮 有任何项目问题可邮件联系 **shy3130@qq.com** · 觉得有用请点个 ⭐ Star
+📮 本 fork 的问题与二开交流：邮件 **657793814@qq.com**，或扫码添加微信「咚咚锵」（见[支持与交流](#-支持与交流)）· 觉得有用请点个 ⭐ Star
 
 ---
 
@@ -100,6 +87,7 @@
 | **📈 个股分析** | 9 类关键价位 + AI 四维分析 |
 | **🏆 连板梯队** | 连板统计 + 概念轮动 + 盘后 AI 复盘 |
 | **🧰 数据扩展** | 插件化数据源, 扩展字段成页, 两级拉取配方, 按日历史回补 |
+| **🌏 多市场（二开）** | A 股 / 港股 / 美股按 `market` 参数隔离, 顶部一键切换; 港美股指数、强度梯队与市场环境独立口径 |
 
 ### 开放能力与工作区扩展
 
@@ -217,11 +205,12 @@
 - 港美股个股维表单独存 `instruments_index_{hk,us}/instruments.parquet`，避免污染 A 股共用 `instruments` 池；`repository.get_instruments_market` 默认 `cn`，A 股行为不变。
 - 港美股无成交额、无概念/行业、无分时（`/minute` 恒空）；美股指数历史仅快照标记 `snapshot:true`；涨停/连板策略在港美股不可用（已门控）。
 
-#### 尚未完成的集成（诚实声明）
+#### 当前边界与升级复核（诚实声明）
 
-- 策略跑的页面层 market 接入（各页面读取 `useMarket` 并路由到对应市场数据）；
-- regime/overview/dashboard/screener/recap/analysis 的 `market` 参数在数据侧完整透传（部分接口已透传，页面层待接入）；
-- DuckDB 视图增量注册（港美股 parquet 写入后视图刷新由 `repository.store._register_views()` 触发）。
+- **页面层**：看板、策略、回测、自选、市场环境、指数、数据页及复盘/分析类扩展页已读取 `useMarket` 并传 `market`；未接入的页面仍按 A 股（`cn`）口径展示。
+- **接口层**：`overview` / `screener` / `regime` / `kline` / `abnormal` / `watchlist` / `stock_analysis` 等接口已接受 `market` 查询参数；其他接口保持上游 A 股默认行为。
+- **能力边界**：港美股不支持涨停/连板类策略、分时与板块/概念行业数据；美股指数历史仅以 `snapshot:true` 标记快照。A 股路径、返回与存储目录名保持不变。
+- **升级复核**：本章节为 fork 增量，合并上游后按 [二次开发与升级基线](./docs/secondary-development.md#0-本仓库二开基线) 重新核对 `market` 透传与市场隔离行为。
 
 > 本章节由多市场扩展复刻工作沉淀，随后续集成推进更新。
 
@@ -281,7 +270,7 @@
 | 数据写闭环   | 外部写入复用管理端同一校验/落盘路径 | `write:ext` 只写行数据,表结构锁死管理面    |
 | 事件推送     | 告警落盘即广播,**亚秒级**到 SSE 流  | 进程内事件总线(丢旧保新)+ 一次性票据订阅   |
 | MCP 工具调用 | 12 工具按 scope 联动暴露            | 薄桥零业务逻辑,权限裁决复用网关            |
-| 质量保障     | **3000+ 测试全绿,约 100 秒跑完**    | GitHub Actions CI(后端全量 + 前端构建)     |
+| 质量保障     | **3000+ 测试用例** · CI 状态以本 fork Actions 为准 | GitHub Actions CI(后端全量 + 前端构建)     |
 
 ---
 
@@ -292,8 +281,8 @@
 
 面板的核心能力不只长在页面上 —— **全部开放成受控接口**,外部程序与 AI 客户端平等消费:
 
-> 🌐 **开放平台门户已上线 → [tsp.shy313.com](https://tsp.shy313.com/)**
-> 浏览 TSP 全部功能 · 注册账户 · 邀请好友 · 创建 API Key · 在线调用开放接口,一个入口直达。
+> 🌐 **上游开放平台门户**：[tsp.shy313.com](https://tsp.shy313.com/)（非本 fork 的服务）
+> 本 fork 的开放接口随本地部署提供: **设置 → 开放接口** 创建 Token, [examples/open-api](./examples/open-api/README.md) 可直接运行。
 
 <table>
   <tr>
@@ -387,12 +376,14 @@ docker run -d --name tsp \
   -p 3018:3018 \
   -e DATA_DIR=/app/data \
   -v "${PWD}/data:/app/data" \
-  ghcr.io/shy3130/tick-stock-panel:latest
+  ghcr.io/657793814/tick-stock-panel:latest
 ```
 
-**打开 <http://localhost:3018> 即可使用** · 多架构镜像(linux/amd64 · arm64)由 CI 自动发布,本地无需 Python / Node
+**打开 <http://localhost:3018> 即可使用** · 镜像由本 fork 的 Actions 按 `github.repository` 发布,本地无需 Python / Node
 
-**还没决定要不要部署?** 先逛逛 **[官网 tsp.shy313.com](https://tsp.shy313.com/)** —— 功能总览 · 账户注册 · API Key 管理
+> ℹ️ 上游镜像是 `ghcr.io/shy3130/tick-stock-panel:latest`（不含本 fork 的多市场/UI 改动）。若本 fork 镜像尚未成功构建,请改用下方**方式 B 本地构建**。
+
+**还没决定要不要部署?** 可先看 **[完整功能说明](./docs/features.md)** 与 **[截图预览](#-界面预览)**。
 
 </div>
 
@@ -400,23 +391,23 @@ docker run -d --name tsp \
 
 | 方式                                  | 适合谁                      | 前置要求                                                                             |
 | :------------------------------------ | :-------------------------- | :----------------------------------------------------------------------------------- |
-| **[A · GHCR 现成镜像](#install-image)**(即上方一条命令) | 多数用户，拿来即用 ⭐ 推荐 | Docker |
-| **[B · Compose 本地构建](#install-compose)** | 跑自己改过的代码 / 全套挂载 | Docker |
+| **[A · GHCR 现成镜像](#install-image)**(即上方一条命令) | 镜像可用时拿来即用 | Docker |
+| **[B · Compose 本地构建](#install-compose)** | ⭐ 推荐:跑本 fork 的二开代码 / 全套挂载 | Docker |
 | **[C · 本机 AI 代部署](#install-ai)** | 完全不想碰命令行 | 任一本机 AI 编程助手 |
 | **[D · Dev 模式](#install-dev)** | 二次开发 | Python ≥ 3.11 · Node ≥ 20 · [uv](https://docs.astral.sh/uv/) · pnpm(`npm i -g pnpm`) |
 | **[E · 桌面客户端](#install-desktop)** | 想要原生桌面窗口、免装环境 | Windows 10+ / macOS(Apple Silicon) |
 
 <a id="install-image"></a>
 
-### 方式 A:GHCR 现成镜像(免本地构建,多数用户推荐)
+### 方式 A:GHCR 现成镜像(免本地构建,镜像可用时推荐)
 
-本项目每次推送都由 GitHub Actions 自动构建多架构镜像并发布到 GHCR,拿来即用:
+本 fork 推送到 `main` 时由 GitHub Actions 自动构建多架构镜像并发布到 `ghcr.io/657793814/tick-stock-panel`:
 
 - 需要配置时:从 [.env.example](./.env.example) 复制出 `.env`,命令里加 `--env-file .env`,保留 `-e DATA_DIR=/app/data` 与数据挂载。自定义目录时,同时修改 `DATA_DIR` 和挂载目标。
 - 升级前若凭据实际保存在容器的 `/data` 而非已挂载目录,请先按[旧容器数据备份说明](./docs/deployment.md#docker-升级前核对数据目录)备份迁出,再重建容器。
 - Linux `docker run` 部署:容器内要通过 `host.docker.internal` 访问宿主机服务(如自定义数据源)时,命令需加 `--add-host=host.docker.internal:host-gateway`;升级重建容器时务必保留 `-v ${PWD}/data:/app/data` 挂载并提前备份 `data/`,否则容器层数据会随旧容器静默丢失(详见 [docs/deployment.md](./docs/deployment.md))。
-- 跑自己改过的代码:fork 后到仓库 **Actions** 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
-- 想用 compose 编排(挂载 `.env` / `tiers.yaml`):参考 [docker-compose.yml](./docker-compose.yml),把 `build:` 段换成 `image: ghcr.io/shy3130/tick-stock-panel:latest`。
+- 跑自己改过的代码:再 fork 本仓库后到 **Actions** 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
+- 想用 compose 编排(挂载 `.env` / `tiers.yaml`):参考 [docker-compose.yml](./docker-compose.yml),把 `build:` 段换成 `image: ghcr.io/657793814/tick-stock-panel:latest`。
 - 现成镜像默认不含老 CPU 兼容内核(体积考虑),有此需求请用方式 B 自构建,详见 [docs/deployment.md](./docs/deployment.md)。
 
 <a id="install-compose"></a>
@@ -459,8 +450,8 @@ CODEX_CLI_VERSION=0.144.3 docker compose up --build
 装一个本机 AI 编程助手(Trae / Codex / OpenCode / ZCode / WorkBuddy 等,任选其一),新建一个空文件夹用助手打开,把下面这段话原样发给它:
 
 ```text
-帮我部署开源项目 https://github.com/shy3130/tick-stock-panel 到本机:
-克隆到当前文件夹;有 Docker 优先拉 ghcr.io/shy3130/tick-stock-panel:latest 现成镜像,没有就走 Dev 模式;
+帮我部署二开项目 https://github.com/657793814/tick-stock-panel 到本机:
+克隆到当前文件夹;有 Docker 优先用 docker compose up --build 本地构建(确保包含 fork 的二开改动);镜像 ghcr.io/657793814/tick-stock-panel:latest 可用时也直接用;
 缺少的依赖(Docker / Python / Node)帮我一起装好;
 最后告诉我浏览器打开哪个地址、需要填哪些 Key。
 ```
@@ -495,7 +486,9 @@ Windows 启动器的可用参数:
 
 ### 方式 E:桌面客户端(Windows / macOS)
 
-从 [Releases](https://github.com/shy3130/tick-stock-panel/releases/latest) 下载对应安装包:Windows 双击 `TSP-Setup-x64-*.exe` 按向导安装即可;macOS 下载 `TSP-macos-arm64-*.dmg`。
+从本 fork 的 [Releases](https://github.com/657793814/tick-stock-panel/releases) 下载对应安装包:Windows 双击 `TSP-Setup-x64-*.exe` 按向导安装即可;macOS 下载 `TSP-macos-arm64-*.dmg`。
+
+> 若本 fork 尚未发布安装包,请改用方式 B / D 从源码构建；上游 [Releases](https://github.com/shy3130/tick-stock-panel/releases/latest) 的安装包不含本 fork 的二开改动。
 
 <details>
 <summary><b>🍎 macOS 安装注意事项(点开查看)</b></summary>
@@ -594,7 +587,7 @@ PORT=3018                      # 服务端口
 
 ## 🗺️ 路线图
 
-以下保留早期阶段与版本规划记录；最新已发布功能和版本状态请查看 [Releases](https://github.com/shy3130/tick-stock-panel/releases)。
+以下保留上游早期阶段与版本规划记录；本 fork 的发布状态请查看 [fork Releases](https://github.com/657793814/tick-stock-panel/releases)，上游发布状态见 [上游 Releases](https://github.com/shy3130/tick-stock-panel/releases)。
 
 | Phase                 | 内容                                                                                                                               | 状态          |
 | :-------------------- | :--------------------------------------------------------------------------------------------------------------------------------- | :------------ |
@@ -608,6 +601,7 @@ PORT=3018                      # 服务端口
 | **v0.3.2 开放能力版** | API Token + 六档 scope 网关 · 61 端点契约(快照+CI 守护) · 扩展数据读写闭环 · SSE 事件流 · MCP 服务器 · 核心/扩展域边界标注         | ✅            |
 | **v0.3.6**            | [TdxQuant](https://help.tdx.com.cn/quant/) 数据源(realtime/五档/日K/复权/分钟) · 11 官方页面单文件扩展化 + 运行时页面插件 · 扩展表两级拉取配方(概念/行业出厂即用) · AI Responses 协议与会话跨设备 · 情绪评分口径可配置 · 财务画像手动拉取 · 策略池叠加分组 · 65 端点契约 | 🚧          |
 | **v0.3.7**            | 模拟盘重构(多账户对比·策略自动执行) · 桌面修复(TdxQuant Key 探测·macOS 数据目录移出 .app 包) · 界面缩放 transform scale 修复 · 策略安全校验加固(GH #475) · 68 端点契约 | 🚧          |
+| **fork 二开**         | 多市场(A 股 / 港股 / 美股)能力复刻 · UI 大改造 · 策略整合；基线、边界与升级复核见 [二次开发与升级基线](./docs/secondary-development.md#0-本仓库二开基线)                | 🚧 持续集成 |
 
 ---
 
@@ -650,6 +644,7 @@ PORT=3018                      # 服务端口
 | [数据源插件开发](./docs/plugin-development.md) | 数据源插件开发规范(以 fuyao 为参考实现) |
 | [外部数据源插件安装](./docs/external-data-source-packages.md) | ZIP 安装、Key 配置、版本维护和开发模板 |
 | [二次开发指南](./docs/secondary-development.md) | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板 |
+| [本仓库二开基线](./docs/secondary-development.md#0-本仓库二开基线) | fork 起点、已做改动、与上游的版本关系及升级复核清单 |
 | [页面 SDK](./docs/page-sdk.md) | 页面插件开发指南:产物契约、能力桥 ctx、打包与上传、安全边界 |
 
 ---
@@ -660,28 +655,19 @@ PORT=3018                      # 服务端口
 
 ## ❤️ 支持与交流
 
-<table>
-  <tr>
-    <td align="center" width="50%">
+<div align="center">
 
-<sub>感谢支持 TSP，助力项目持续完善 ❤️</sub>
+**扫码添加微信「咚咚锵」** · 交流本 fork 的使用问题、二开建议与多市场适配
 
 <br/>
 
-<img src="./assets/support/wechat-appreciation.jpg" alt="微信赞赏码 · 感谢道友支持 愿一路长红" height="240" />
-
-</td>
-<td align="center" width="50%">
-
-<sub>欢迎加入交流群,一起讨论交流</sub>
+<img src="./assets/support/wechat-qr.jpg" alt="微信二维码 · 咚咚锵 · 扫码交流" height="280" />
 
 <br/>
 
-<img src="./community-qr-code.jpg" alt="交流群二维码" height="240" />
+<sub>有问题也可以邮件联系 657793814@qq.com；问题复现步骤与截图越具体越好。</sub>
 
-</td>
-  </tr>
-</table>
+</div>
 
 ---
 
@@ -711,15 +697,15 @@ PORT=3018                      # 服务端口
 
 内置数据源插件 [TdxQuant](https://help.tdx.com.cn/quant/) 提供通达信量化数据服务(实时行情 / 五档盘口 / 日K / 复权因子 / 分钟K),需自备 API Key,使用前请遵守其服务条款
 
-## 社区
+## 致谢与来源
 
-本开源项目已链接并认可 [LINUX DO 社区](https://linux.do)。
+本 fork 基于上游 [Tick Stock Panel](https://github.com/shy3130/tick-stock-panel) 二次开发，上游已链接并认可 [LINUX DO 社区](https://linux.do)。本 fork 的问题反馈与二开交流请走[支持与交流](#-支持与交流)中的微信二维码。
 
 ---
 
 <div align="center">
 
-**⭐ 觉得有用?点个 Star 就是最大的支持 · fork 时也请顺手点个 star**
+**⭐ 觉得本 fork 有用?点个 Star 就是最大的支持**
 
 **[⬆️ 回到顶部](#top)**
 

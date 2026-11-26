@@ -4,6 +4,31 @@
 
 修改任何代码前，仍须先完整阅读根目录的 [`CONTRIBUTING.md`](../CONTRIBUTING.md)。金融数据口径、缓存、并发、数据源和测试要求以该文档为准。
 
+## 0. 本仓库二开基线
+
+本仓库是 [`657793814/tick-stock-panel`](https://github.com/657793814/tick-stock-panel) 上的 fork，不是上游仓库本身。阅读本文和 README 时，先区分「上游基线」与「fork 增量」：
+
+| 项 | 当前值 |
+| --- | --- |
+| 上游基线 | `v0.3.37`（`f9cb383c`），其后的 `362fd69b`、`1d0b13c3` 为赞助/文档提交，随 fork 一同继承 |
+| fork 起点 | `80bd69fe` — `feat:UI大改造和策略整合`（本次文档梳理所依据的代码状态；后续提交会改变 HEAD） |
+| 文档口径 | README 的仓库地址、镜像、安装命令、问题反馈以本 fork 为准；上游官网、开放平台门户与赞助入口只作来源说明 |
+| 反馈入口 | README「支持与交流」使用本仓库 `assets/support/wechat-qr.jpg`（微信「咚咚锵」），不再使用上游赞赏码与交流群二维码 |
+
+已落地的 fork 增量（以代码为准，不按设计示例推断）：
+
+- **多市场**：`market` 参数（默认 `cn`）隔离 A 股 / 港股 / 美股；市场注册表、港美股日 K 与指数同步、市场环境、强度梯队、AI 复盘、选股门控与回测印花税等已接入；具体边界见 [README 多市场章节](../README.md#多市场扩展--港美股能力复刻)。
+- **UI 大改造与策略整合**：由 `80bd69fe` 引入，覆盖前后端多处入口与热点文件，不属于上游稳定扩展契约；合并上游时必须逐个复核。
+- **文档与安装口径**：README、`docs/deployment.md`、`操作说明书.md` 中的镜像/克隆地址改为本 fork；上游地址仅在标注来源时保留。
+- **提交噪声**：`80bd69fe` 同时把 `backend/.pytest_tmp/`、`backend/.pytest_basetemp/` 的测试临时产物提交进仓库；这些不是业务代码或扩展 API，清理/升级时单独处理，勿据此推断契约。
+
+升级复核顺序：
+
+1. 添加上游远端后获取目标 Tag：`git remote add upstream https://github.com/shy3130/tick-stock-panel.git && git fetch upstream --tags`。
+2. 运行只读预检 `python3 scripts/upgrade_check.py <目标Tag>`，再执行真实合并；不要用上游开发分支头代替不可变 Tag。
+3. 重点复核 `market` 透传、市场隔离缓存、港美股门控、UI 改造覆盖的前端热点，以及 README/部署文档中的 fork 地址与二维码。
+4. 按本文 §7 验证矩阵和 `CONTRIBUTING.md` 跑回归；Git 显示「无冲突」不等于二开语义仍成立。
+
 ## 1. 文档状态
 
 本文同时描述现有能力和后续按需建设的代码扩展契约。两者不能混用：
