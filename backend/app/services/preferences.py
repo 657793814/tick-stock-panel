@@ -954,6 +954,17 @@ def set_review_push_mode(mode: str) -> str:
     return mode
 
 
+def get_review_push_image() -> bool:
+    """推送复盘时是否附带上图像模型生成的海报。默认关闭（会额外消耗一次生图调用）。"""
+    return load().get("review_push_image") is True
+
+
+def set_review_push_image(enabled: bool) -> bool:
+    """保存「推送附带海报」开关。"""
+    save({"review_push_image": bool(enabled)})
+    return bool(enabled)
+
+
 
 # ===== 实时监控 =====
 

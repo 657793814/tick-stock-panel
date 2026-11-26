@@ -61,17 +61,27 @@ def test_render_poster_returns_1080x1620_png():
 
 
 def test_flat_background_gets_fallback_artwork():
-    """近乎纯色的底图应被程序化金融主视觉替换，海报中部不再是纯背景色。"""
-    out = recap_poster.render_poster(
+    """近乎纯色的底图应被程序化金融主视觉替换，海报中部不再是纯背景色。
+
+    断言对象是 ``prepare_background`` 的背景层，而不是最终成品：成品里的文字笔画
+    也会贡献方差，字体缺失时（无 CJK 字体的 CI）会让断言误判。背景层才是"是否
+    有真实画面细节"的准确度量。
+    """
+    bg = recap_poster.prepare_background(
         _background(),  # 纯色 (12,20,38)
-        content=_SAMPLE,
         as_of="2026-11-27",
         emotion_score=62,
     )
-    with Image.open(io.BytesIO(out)) as img:
-        # 中部主体区裁切后应有足够的亮度方差（K线/天际线细节）。
-        mid = img.convert("L").crop((120, 700, 960, 1250)).resize((64, 32))
-        pixels = list(mid.getdata())
-        mean = sum(pixels) / len(pixels)
-        var = sum((p - mean) ** 2 for p in pixels) / len(pixels)
-        assert var > 20, f"兜底主视觉细节不足, 方差={var:.1f}"
+    # 中部主体区裁切后应有足够的亮度方差（K线/天际线细节）。
+    mid = bg.convert("L").crop((120, 700, 960, 1250)).resize((64, 32))
+    pixels = list(mid.getdata())
+    mean = sum(pixels) / len(pixels)
+    var = sum((p - mean) ** 2 for p in pixels) / len(pixels)
+    assert var > 20, f"兜底主视觉细节不足, 方差={var:.1f}"
+
+
+def test_flat_background_fallback_is_deterministic():
+    """同一 as_of 的兜底底图必须稳定复现（hash() 受 PYTHONHASHSEED 影响会漂移）。"""
+    a = recap_poster.prepare_background(_background(), as_of="2026-11-27", emotion_score=62)
+    b = recap_poster.prepare_background(_background(), as_of="2026-11-27", emotion_score=62)
+    assert a.tobytes() == b.tobytes()

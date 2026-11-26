@@ -2668,6 +2668,8 @@ export interface Preferences {
   review_schedule: { enabled: boolean; hour: number; minute: number }
   review_push_channels: string[]
   review_push_mode?: 'auto' | 'manual'
+  /** 推送复盘时是否附带 AI 生成的海报 */
+  review_push_image?: boolean
   /** 用户自定义复盘系统提示词；空串 = 使用内置默认模板 */
   market_recap_system_prompt?: string
   sse_refresh_pages: Record<string, boolean>
@@ -3479,10 +3481,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled, hour, minute }),
     }),
-  updateReviewPush: (channels: string[], mode?: 'auto' | 'manual') =>
-    request<{ review_push_channels: string[]; review_push_mode: 'auto' | 'manual' }>('/api/settings/preferences/review-push', {
+  updateReviewPush: (channels: string[], mode?: 'auto' | 'manual', image?: boolean) =>
+    request<{ review_push_channels: string[]; review_push_mode: 'auto' | 'manual'; review_push_image: boolean }>('/api/settings/preferences/review-push', {
       method: 'PUT',
-      body: JSON.stringify({ channels, mode: mode ?? null }),
+      body: JSON.stringify({ channels, mode: mode ?? null, image: image ?? null }),
     }),
   /** 复盘系统提示词: 自定义值 + 内置默认全文(按需拉取, 供「填入默认模板」) */
   getMarketRecapPrompt: () =>

@@ -267,11 +267,14 @@ def save_report(request: Request, req: SaveReportRequest):
     # 推送门控: manual 模式需显式 push=True; auto 模式保持归档即推。
     # 内部 try/except 静默降级, 不影响归档返回值。
     if req.push or preferences.get_review_push_mode() == "auto":
-        from app.jobs.daily_pipeline import _maybe_push_review
-        _maybe_push_review(req.content, {
-            "as_of": req.as_of,
-            "emotion_label": req.emotion_label,
-        })
+        from app.jobs.daily_pipeline import dispatch_review_push
+        meta: dict = {"as_of": req.as_of, "emotion_label": req.emotion_label}
+        # 海报提示词要用摘要与情绪分；为空时不塞键，保持旧 meta 结构兼容。
+        if req.summary:
+            meta["summary"] = req.summary
+        if req.emotion_score is not None:
+            meta["emotion_score"] = req.emotion_score
+        dispatch_review_push(req.content, meta)
     return {"ok": True, "report": report}
 
 

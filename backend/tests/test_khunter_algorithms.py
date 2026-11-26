@@ -157,7 +157,12 @@ def test_adx_strategy_loads_and_filters():
     import polars as pl
     from app.strategy.engine import StrategyEngine
     data_dir = Path(__file__).resolve().parents[1].parent / "data"
-    engine = StrategyEngine(strategy_dirs=[data_dir / "strategies" / "custom"])
+    strategy_file = data_dir / "strategies" / "custom" / "khunter_adx_regime.py"
+    # 自定义策略放在 data/ 下（gitignore，属于用户私有二开产物），CI 仓库里没有。
+    # 缺失时跳过而不是报 unknown strategy，否则每次 CI 都会失败。
+    if not strategy_file.is_file():
+        pytest.skip("data/strategies/custom/khunter_adx_regime.py 不存在（用户私有策略，未入库）")
+    engine = StrategyEngine(strategy_dirs=[strategy_file.parent])
     s = engine.get("khunter_adx_regime")
     assert s is not None
     assert abs(sum(float(v) for v in s.meta["scoring"].values()) - 1.0) < 1e-6

@@ -86,9 +86,14 @@ def send_email(
     body: str,
     *,
     max_attempts: int = _MAX_ATTEMPTS,
+    attachment: tuple[str, bytes, str] | None = None,
 ) -> bool:
-    """Send one UTF-8 plain-text email through SSL, STARTTLS, or plain SMTP."""
-    ok, _ = _deliver(config, password, subject, body, max_attempts)
+    """Send one UTF-8 plain-text email through SSL, STARTTLS, or plain SMTP.
+
+    ``attachment`` 为可选附件 (文件名, 内容, MIME 主类型/子类型如 "image/png")，
+    用于把复盘海报一起发出。
+    """
+    ok, _ = _deliver(config, password, subject, body, max_attempts, attachment=attachment)
     return ok
 
 
@@ -113,6 +118,8 @@ def _deliver(
     subject: str,
     body: str,
     max_attempts: int,
+    *,
+    attachment: tuple[str, bytes, str] | None = None,
 ) -> tuple[bool, str]:
     """实际投递逻辑。返回 (是否成功, 最后一次失败原因)。"""
     if not is_configured(config):
@@ -141,6 +148,15 @@ def _deliver(
     message["From"] = sender
     message["To"] = ", ".join(recipients)
     message.set_content(str(body or ""))
+    if attachment:
+        filename, payload, mime = attachment
+        maintype, _, subtype = (mime or "application/octet-stream").partition("/")
+        message.add_attachment(
+            payload,
+            maintype=maintype or "application",
+            subtype=subtype or "octet-stream",
+            filename=filename,
+        )
 
     last_err = ""
     for attempt in range(1, max_attempts + 1):

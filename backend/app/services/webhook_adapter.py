@@ -347,6 +347,33 @@ def send_wecom_markdown(webhook_url: str, title: str, body_md: str) -> bool:
     return _post_wecom(webhook_url, payload)
 
 
+# 企业微信图片消息上限: base64 前原图 ≤2MB (超过会被服务端拒绝)。
+_WECOM_IMAGE_MAX_BYTES = 2 * 1024 * 1024
+
+
+def send_wecom_image(webhook_url: str, image_bytes: bytes) -> bool:
+    """推送一张图片到企业微信群推送 Webhook（复盘海报）。
+
+    企业微信 image 消息要求 base64 + 原始内容 md5，本身即公网无关，
+    因此本地部署也能直接发图（飞书自定义机器人做不到这点）。
+    """
+    webhook_url = normalize_wecom_url(webhook_url)
+    if not is_valid_wecom_url(webhook_url) or not image_bytes:
+        return False
+    if len(image_bytes) > _WECOM_IMAGE_MAX_BYTES:
+        logger.warning("企业微信图片超过 2MB, 跳过推送 (%d bytes)", len(image_bytes))
+        return False
+
+    payload: dict = {
+        "msgtype": "image",
+        "image": {
+            "base64": base64.b64encode(image_bytes).decode("ascii"),
+            "md5": hashlib.md5(image_bytes).hexdigest(),
+        },
+    }
+    return _post_wecom(webhook_url, payload)
+
+
 # ================================================================
 # 通用第三方 JSON Webhook
 # ================================================================

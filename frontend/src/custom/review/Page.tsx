@@ -126,6 +126,8 @@ export function ReviewPage() {
   const reviewPushChannels = prefs.data?.review_push_channels ?? []
   // 推送触发方式: auto=归档即推; manual=仅归档不自动外发。默认 manual。
   const reviewPushMode = prefs.data?.review_push_mode ?? 'manual'
+  // 推送时是否附带 AI 生成的海报(仅企微群/邮件/飞书应用机器人支持)
+  const reviewPushImage = prefs.data?.review_push_image === true
   // 弹窗内的本地草稿: 开关和时间都在本地改, 点「保存」才真正提交(避免开关一拨就关弹窗)
   const [draft, setDraft] = useState(reviewSched)
   const openSchedule = useCallback(() => {
@@ -163,6 +165,15 @@ export function ReviewPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.preferences })
       toast('已更新推送触发方式', 'success')
+    },
+    onError: () => { /* request() 已 toast */ },
+  })
+  // 推送附带海报: 开启后每次推送会多消耗一次图像模型调用(生成约 10-30 秒)
+  const pushImageMut = useMutation({
+    mutationFn: (image: boolean) => api.updateReviewPush(reviewPushChannels, undefined, image),
+    onSuccess: (_data, image) => {
+      qc.invalidateQueries({ queryKey: QK.preferences })
+      toast(image ? '已开启推送附带海报' : '已关闭推送附带海报', 'success')
     },
     onError: () => { /* request() 已 toast */ },
   })
@@ -652,6 +663,26 @@ export function ReviewPage() {
                   </div>
                 </div>
 
+                {/* 推送附带海报: 仅企微群/邮件/飞书应用机器人支持带图 */}
+                <div className="mt-2 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[11px] text-foreground">
+                    <ImageIcon className="h-3.5 w-3.5 text-accent" />
+                    附带复盘海报
+                  </span>
+                  <button
+                    type="button"
+                    disabled={pushImageMut.isPending}
+                    onClick={() => pushImageMut.mutate(!reviewPushImage)}
+                    aria-pressed={reviewPushImage}
+                    className={cn(
+                      'relative h-5 w-9 rounded-full transition-colors disabled:opacity-50',
+                      reviewPushImage ? 'bg-accent' : 'bg-border',
+                    )}
+                  >
+                    <span className={cn('inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform', reviewPushImage ? 'translate-x-[19px]' : 'translate-x-1')} />
+                  </button>
+                </div>
+
                 <p className="mt-1.5 text-[10px] leading-relaxed text-muted/70">
                   {reviewPushMode === 'auto'
                     ? '定时与手动生成的复盘归档后都会自动推送完整报告。'
@@ -668,6 +699,11 @@ export function ReviewPage() {
                     </Link>
                   )}
                 </p>
+                {reviewPushImage && (
+                  <p className="mt-1 text-[10px] leading-relaxed text-muted/70">
+                    企业微信群、邮件、飞书应用机器人可带图；飞书群 Webhook 与第三方 Webhook 仅发文本。每次推送会多一次图像模型调用。
+                  </p>
+                )}
               </div>
 
               {/* 自定义复盘提示词(折叠区, 展开/保存/恢复默认/填入默认模板) */}

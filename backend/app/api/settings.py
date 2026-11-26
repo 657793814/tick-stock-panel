@@ -808,6 +808,7 @@ def get_preferences() -> dict:
         "review_schedule": preferences.get_review_schedule(),
         "review_push_channels": preferences.get_review_push_channels(),
         "review_push_mode": preferences.get_review_push_mode(),
+        "review_push_image": preferences.get_review_push_image(),
         "market_recap_system_prompt": preferences.get_market_recap_system_prompt(),
         # 界面偏好 (通知弹窗/声效/语音播报/外链模板/界面缩放): 历史只存 localStorage,
         # 桌面版端口变化后 origin 改变导致读取不到 — 后端保存权威副本, 前端启动时回填。
@@ -2494,11 +2495,12 @@ def update_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
 class ReviewPushIn(BaseModel):
     channels: list[str]  # 多选: feishu / wecom / custom / email; 空数组=不推送
     mode: str | None = None  # 可选: auto=归档即推 / manual=仅显式 push; 不传则不变
+    image: bool | None = None  # 可选: 推送时附带 AI 生成的海报; 不传则不变
 
 
 @router.put("/preferences/review-push")
 def update_review_push(req: ReviewPushIn) -> dict:
-    """复盘推送设置(渠道多选 + 触发方式)。
+    """复盘推送设置(渠道多选 + 触发方式 + 是否附海报)。
 
     纯偏好, 与定时复盘 / 实时行情完全独立, 常驻可单独设置。空数组=不推送。
     实际推送由归档端点(POST /api/market-recap/reports)与定时任务(_run_scheduled_review)
@@ -2506,13 +2508,21 @@ def update_review_push(req: ReviewPushIn) -> dict:
       - manual: 定时复盘只归档不推送, 手动保存需显式 push=true
       - auto: 归档即推(行为与旧逻辑一致)
     白名单外的渠道会被过滤掉, 白名单外的 mode 值回退 manual。
+    review_push_image=True 时额外生成一张海报随推送发出(企业微信群/邮件/飞书应用支持)。
     """
     from app.services import preferences
     saved = preferences.set_review_push_channels(req.channels)
     mode = preferences.get_review_push_mode()
     if req.mode is not None:
         mode = preferences.set_review_push_mode(req.mode)
-    return {"review_push_channels": saved, "review_push_mode": mode}
+    push_image = preferences.get_review_push_image()
+    if req.image is not None:
+        push_image = preferences.set_review_push_image(req.image)
+    return {
+        "review_push_channels": saved,
+        "review_push_mode": mode,
+        "review_push_image": push_image,
+    }
 
 
 class MarketRecapPromptIn(BaseModel):

@@ -1403,7 +1403,7 @@ async def _run_scheduled_review(repo) -> None:
         # 由用户对当日报告显式确认后才推; auto 时保持既有自动推送行为。
         # 失败静默降级, 不影响已归档的报告。
         if _prefs.get_review_push_mode() == "auto":
-            _maybe_push_review(content, meta)
+            dispatch_review_push(content, meta)
     except Exception as e:  # noqa: BLE001
         logger.exception("scheduled review failed: %s", e)
         # 兜底: 异常时通知前端停止「生成中」状态, 避免页面卡在 streaming
@@ -1480,11 +1480,73 @@ async def _stream_review_with_retry(repo, quote_service, depth_service) -> tuple
     return "".join(content_parts), last_meta
 
 
+def dispatch_review_push(content: str, meta: dict) -> None:
+    """把复盘推送派发出去：带图模式下放后台线程，避免阻塞请求/事件循环。
+
+    生图要 10~30 秒，海报又只是增强项；因此开启「附带海报」时用守护线程异步推，
+    未开启时保持原有同步行为（便于调用方感知并复用既有测试断言）。
+    """
+    if not _prefs.get_review_push_image():
+        _maybe_push_review(content, meta)
+        return
+
+    import threading
+
+    threading.Thread(
+        target=_maybe_push_review,
+        args=(content, meta),
+        name="review-push",
+        daemon=True,
+    ).start()
+
+
+def _build_review_poster(content: str, meta: dict) -> bytes | None:
+    """同步上下文里生成复盘海报（推送链路是 sync 的，内部自建事件循环）。
+
+    已运行在事件循环中时不能直接 asyncio.run，放到独立线程里跑，避免
+    "asyncio.run() cannot be called from a running event loop"。
+    """
+    import asyncio
+    import threading
+
+    from app.services.recap_poster import generate_recap_poster
+
+    kwargs = {
+        "as_of": meta.get("as_of") or "",
+        "summary": meta.get("summary") or "",
+        "emotion_label": meta.get("emotion_label") or "",
+        "emotion_score": meta.get("emotion_score"),
+    }
+
+    def _run() -> bytes | None:
+        return asyncio.run(generate_recap_poster(content, **kwargs))
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _run()
+
+    box: dict[str, bytes | None] = {}
+
+    def _worker() -> None:
+        try:
+            box["poster"] = _run()
+        except Exception:  # noqa: BLE001 — 已在 generate_recap_poster 内降级, 这里只兜底
+            box["poster"] = None
+
+    thread = threading.Thread(target=_worker, name="review-poster", daemon=True)
+    thread.start()
+    thread.join(timeout=240)  # 生图模型最慢 180s, 留余量; 超时按无图处理
+    return box.get("poster")
+
+
 def _maybe_push_review(content: str, meta: dict) -> None:
     """复盘报告归档后, 按 review_push_channels 选定的外部工具逐个推送完整报告。
 
     定时生成与手动生成共用本函数 (手动归档端点 POST /api/market-recap/reports 也会调用)。
     channels 为空则不推送; 复用监控中心的全局外部渠道配置。
+    review_push_image=True 且已配置图像模型时, 额外生成一张海报随报告推送
+    (企业微信群 / 邮件 / 飞书应用机器人支持带图; 飞书自定义机器人只有文本)。
     推送失败静默降级 (Webhook 是辅助通道), 不影响已归档的报告。
     """
     try:
@@ -1500,6 +1562,10 @@ def _maybe_push_review(content: str, meta: dict) -> None:
         emotion = f"{meta.get('emotion_label') or ''}".strip()
         as_of = meta.get("as_of") or ""
         subtitle = as_of + (f" · 情绪 {emotion}" if emotion else "")
+
+        poster: bytes | None = None
+        if preferences.get_review_push_image():
+            poster = _build_review_poster(content, meta)
 
         for ch in channels:
             if ch == "feishu":
@@ -1523,6 +1589,9 @@ def _maybe_push_review(content: str, meta: dict) -> None:
                     url, "每日复盘", full_body
                 )
                 logger.info("review push(wecom) %s", "sent" if ok else "failed")
+                if poster:
+                    img_ok = webhook_adapter.send_wecom_image(url, poster)
+                    logger.info("review push(wecom image) %s", "sent" if img_ok else "failed")
             elif ch == "custom":
                 url = preferences.get_custom_webhook_url()
                 if not url:
@@ -1547,6 +1616,12 @@ def _maybe_push_review(content: str, meta: dict) -> None:
                 body = (f"{subtitle}\n\n{content}" if subtitle else content)
                 ok = feishu_app.send_text(app_id, app_secret, chat_id, "每日复盘", body)
                 logger.info("review push(feishu_app) %s", "sent" if ok else "failed")
+                if poster:
+                    img_ok, img_err = feishu_app.send_image(app_id, app_secret, chat_id, poster)
+                    logger.info(
+                        "review push(feishu_app image) %s %s",
+                        "sent" if img_ok else "failed", "" if img_ok else img_err,
+                    )
             elif ch == "wecom_bot":
                 bot_svc = WecomBotService.instance()
                 chat_id = preferences.get_wecom_bot_chat_id()
@@ -1562,11 +1637,15 @@ def _maybe_push_review(content: str, meta: dict) -> None:
                     logger.info("review push(email) skipped: SMTP not configured")
                     continue
                 email_body = (f"{subtitle}\n\n{content}" if subtitle else content)
+                email_kwargs = {}
+                if poster:
+                    email_kwargs["attachment"] = (f"复盘海报-{as_of or 'latest'}.png", poster, "image/png")
                 ok = email_adapter.send_email(
                     config,
                     secrets_store.get_email_smtp_password(),
                     "每日复盘",
                     email_body,
+                    **email_kwargs,
                 )
                 logger.info("review push(email) %s", "sent" if ok else "failed")
             # 未来更多渠道在此追加分支

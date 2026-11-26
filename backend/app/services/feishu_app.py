@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 _BASE = "https://open.feishu.cn/open-apis"
 _TIMEOUT = 10.0
+# 图片上传是二进制传输, 比文本接口慢, 单独放宽超时
+_UPLOAD_TIMEOUT = 30.0
 # token 失效类错误码: 清缓存重换一次 token 再试
 _TOKEN_INVALID_CODES = {99991661, 99991663, 99991668}
 
@@ -140,6 +142,82 @@ def send_text_diagnose(
             if ok:
                 return True, ""
     return False, err
+
+
+def send_image(
+    app_id: str,
+    app_secret: str,
+    chat_id: str,
+    image_bytes: bytes,
+    *,
+    filename: str = "poster.png",
+) -> tuple[bool, str]:
+    """推送一张图片到 chat_id（复盘海报）。
+
+    飞书发图需要两步：先上传素材换 image_key，再用 image 消息发出去。
+    自定义机器人 webhook 没有这个上传能力，所以只有自建应用能做带图推送。
+    """
+    app_id = (app_id or "").strip()
+    app_secret = (app_secret or "").strip()
+    chat_id = (chat_id or "").strip()
+    if not is_configured(app_id, app_secret, chat_id):
+        return False, "尚未完整配置 App ID / App Secret / 目标群"
+    if not image_bytes:
+        return False, "图片内容为空"
+
+    token, err = _get_token(app_id, app_secret)
+    if not token:
+        return False, err
+
+    image_key = ""
+    for attempt in range(2):
+        try:
+            resp = httpx.post(
+                f"{_BASE}/im/v1/images",
+                headers={"Authorization": f"Bearer {token}"},
+                data={"image_type": "message"},
+                files={"image": (filename, image_bytes, "image/png")},
+                timeout=_UPLOAD_TIMEOUT,
+            )
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001 - 上传失败只返回原因
+            return False, f"上传图片失败: {type(exc).__name__}: {exc}"
+
+        code = int(data.get("code") or 0)
+        if code == 0:
+            image_key = str((data.get("data") or {}).get("image_key") or "")
+            break
+        if code in _TOKEN_INVALID_CODES and attempt == 0:
+            _invalidate(app_id)
+            token, err = _get_token(app_id, app_secret)
+            if not token:
+                return False, err
+            continue
+        return False, f"上传图片被拒({code}): {data.get('msg')}"
+
+    if not image_key:
+        return False, "飞书未返回 image_key"
+
+    try:
+        resp = httpx.post(
+            f"{_BASE}/im/v1/messages",
+            params={"receive_id_type": "chat_id"},
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "receive_id": chat_id,
+                "msg_type": "image",
+                "content": json.dumps({"image_key": image_key}),
+            },
+            timeout=_TIMEOUT,
+        )
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return False, f"发送图片失败: {type(exc).__name__}: {exc}"
+
+    code = int(data.get("code") or 0)
+    if code == 0:
+        return True, ""
+    return False, f"飞书发送图片错误({code}): {data.get('msg')}"
 
 
 def list_chats(app_id: str, app_secret: str) -> tuple[list[dict], str]:
