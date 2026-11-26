@@ -369,19 +369,18 @@ curl -H "Authorization: Bearer tsp_xxxx" \
 
 <div align="center">
 
-### 已装 Docker?一条命令跑起来 ⬇️
+### 已装 Docker?本地构建跑起来 ⬇️
 
 ```bash
-docker run -d --name tsp \
-  -p 3018:3018 \
-  -e DATA_DIR=/app/data \
-  -v "${PWD}/data:/app/data" \
-  ghcr.io/657793814/tick-stock-panel:latest
+git clone https://github.com/657793814/tick-stock-panel.git
+cd tick-stock-panel
+cp .env.example .env            # compose 的 env_file 要求 .env 存在
+docker compose up --build -d
 ```
 
-**打开 <http://localhost:3018> 即可使用** · 镜像由本 fork 的 Actions 按 `github.repository` 发布,本地无需 Python / Node
+**打开 <http://localhost:3018> 即可使用** · 本地构建以当前仓库源码为准，包含本 fork 的多市场 / UI 改动；数据落在仓库根目录的 `./data`。
 
-> ℹ️ 上游镜像是 `ghcr.io/shy3130/tick-stock-panel:latest`（不含本 fork 的多市场/UI 改动）。若本 fork 镜像尚未成功构建,请改用下方**方式 B 本地构建**。
+> ⚠️ `docker-compose.yml` 会把宿主机 `./frontend/dist` 挂载到容器 `/app/static`。如果你改过前端源码，先执行 `pnpm --dir frontend install && pnpm --dir frontend build` 重建 dist 再启动，否则 3018 仍显示旧界面。后端 `.py` 改动只需 `docker compose restart`。
 
 **还没决定要不要部署?** 可先看 **[完整功能说明](./docs/features.md)** 与 **[截图预览](#-界面预览)**。
 
@@ -391,34 +390,22 @@ docker run -d --name tsp \
 
 | 方式                                  | 适合谁                      | 前置要求                                                                             |
 | :------------------------------------ | :-------------------------- | :----------------------------------------------------------------------------------- |
-| **[A · GHCR 现成镜像](#install-image)**(即上方一条命令) | 镜像可用时拿来即用 | Docker |
-| **[B · Compose 本地构建](#install-compose)** | ⭐ 推荐:跑本 fork 的二开代码 / 全套挂载 | Docker |
-| **[C · 本机 AI 代部署](#install-ai)** | 完全不想碰命令行 | 任一本机 AI 编程助手 |
-| **[D · Dev 模式](#install-dev)** | 二次开发 | Python ≥ 3.11 · Node ≥ 20 · [uv](https://docs.astral.sh/uv/) · pnpm(`npm i -g pnpm`) |
-| **[E · 桌面客户端](#install-desktop)** | 想要原生桌面窗口、免装环境 | Windows 10+ / macOS(Apple Silicon) |
-
-<a id="install-image"></a>
-
-### 方式 A:GHCR 现成镜像(免本地构建,镜像可用时推荐)
-
-本 fork 推送到 `main` 时由 GitHub Actions 自动构建多架构镜像并发布到 `ghcr.io/657793814/tick-stock-panel`:
-
-- 需要配置时:从 [.env.example](./.env.example) 复制出 `.env`,命令里加 `--env-file .env`,保留 `-e DATA_DIR=/app/data` 与数据挂载。自定义目录时,同时修改 `DATA_DIR` 和挂载目标。
-- 升级前若凭据实际保存在容器的 `/data` 而非已挂载目录,请先按[旧容器数据备份说明](./docs/deployment.md#docker-升级前核对数据目录)备份迁出,再重建容器。
-- Linux `docker run` 部署:容器内要通过 `host.docker.internal` 访问宿主机服务(如自定义数据源)时,命令需加 `--add-host=host.docker.internal:host-gateway`;升级重建容器时务必保留 `-v ${PWD}/data:/app/data` 挂载并提前备份 `data/`,否则容器层数据会随旧容器静默丢失(详见 [docs/deployment.md](./docs/deployment.md))。
-- 跑自己改过的代码:再 fork 本仓库后到 **Actions** 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
-- 想用 compose 编排(挂载 `.env` / `tiers.yaml`):参考 [docker-compose.yml](./docker-compose.yml),把 `build:` 段换成 `image: ghcr.io/657793814/tick-stock-panel:latest`。
-- 现成镜像默认不含老 CPU 兼容内核(体积考虑),有此需求请用方式 B 自构建,详见 [docs/deployment.md](./docs/deployment.md)。
+| **[A · Compose 本地构建](#install-compose)**(即上方命令) | ⭐ 推荐:跑本 fork 的二开代码 | Docker |
+| **[B · 本机 AI 代部署](#install-ai)** | 完全不想碰命令行 | 任一本机 AI 编程助手 |
+| **[C · Dev 模式](#install-dev)** | 二次开发 | Python ≥ 3.11 · Node ≥ 20 · [uv](https://docs.astral.sh/uv/) · pnpm(`npm i -g pnpm`) |
+| **[D · 桌面客户端](#install-desktop)** | 想要原生桌面窗口、免装环境 | Windows 10+ / macOS(Apple Silicon) |
 
 <a id="install-compose"></a>
 
-### 方式 B:Docker Compose(本地构建,全套挂载)
+### 方式 A:Docker Compose(本地构建,全套挂载,推荐)
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose up --build -d
 # 打开 http://localhost:3018
 ```
+
+> 不要用 `docker run ... ghcr.io/shy3130/tick-stock-panel:latest` 或 `ghcr.io/657793814/tick-stock-panel:latest` 作为本 fork 的部署入口：前者不含二开，后者不保证包含当前源码的改动。GHCR 镜像只作为可选试跑，入口见 [docs/deployment.md](./docs/deployment.md)。
 
 <details>
 <summary><b>🐳 Codex CLI 挂载、版本覆盖与插件开关(点开查看)</b></summary>
@@ -445,13 +432,13 @@ CODEX_CLI_VERSION=0.144.3 docker compose up --build
 
 <a id="install-ai"></a>
 
-### 方式 C:本机 AI 代部署(AI玩家首选)
+### 方式 B:本机 AI 代部署(AI玩家首选)
 
 装一个本机 AI 编程助手(Trae / Codex / OpenCode / ZCode / WorkBuddy 等,任选其一),新建一个空文件夹用助手打开,把下面这段话原样发给它:
 
 ```text
 帮我部署二开项目 https://github.com/657793814/tick-stock-panel 到本机:
-克隆到当前文件夹;有 Docker 优先用 docker compose up --build 本地构建(确保包含 fork 的二开改动);镜像 ghcr.io/657793814/tick-stock-panel:latest 可用时也直接用;
+克隆到当前文件夹;先 cp .env.example .env;有 Docker 就执行 docker compose up --build -d 本地构建(确保包含 fork 的二开改动);不要用 GHCR 现成镜像代替本地构建;
 缺少的依赖(Docker / Python / Node)帮我一起装好;
 最后告诉我浏览器打开哪个地址、需要填哪些 Key。
 ```
@@ -460,7 +447,7 @@ AI 会自动完成克隆、装依赖、启动服务,完成后浏览器打开 <ht
 
 <a id="install-dev"></a>
 
-### 方式 D:Dev 模式(二次开发推荐)
+### 方式 C:Dev 模式(二次开发推荐)
 
 ```bash
 cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
@@ -484,11 +471,11 @@ Windows 启动器的可用参数:
 
 <a id="install-desktop"></a>
 
-### 方式 E:桌面客户端(Windows / macOS)
+### 方式 D:桌面客户端(Windows / macOS)
 
 从本 fork 的 [Releases](https://github.com/657793814/tick-stock-panel/releases) 下载对应安装包:Windows 双击 `TSP-Setup-x64-*.exe` 按向导安装即可;macOS 下载 `TSP-macos-arm64-*.dmg`。
 
-> 若本 fork 尚未发布安装包,请改用方式 B / D 从源码构建；上游 [Releases](https://github.com/shy3130/tick-stock-panel/releases/latest) 的安装包不含本 fork 的二开改动。
+> 若本 fork 尚未发布安装包,请改用方式 A / C 从源码构建；上游 [Releases](https://github.com/shy3130/tick-stock-panel/releases/latest) 的安装包不含本 fork 的二开改动。
 
 <details>
 <summary><b>🍎 macOS 安装注意事项(点开查看)</b></summary>

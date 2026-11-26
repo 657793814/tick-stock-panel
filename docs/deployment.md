@@ -2,15 +2,38 @@
 
 本项目的几种运行方式，按推荐程度排序。配置项详解见 [configuration.md](./configuration.md)。
 
-> 🍴 本文档对应 [657793814/tick-stock-panel](https://github.com/657793814/tick-stock-panel) fork：镜像/克隆地址均为本 fork。上游 `ghcr.io/shy3130/tick-stock-panel:latest` 与 `shy3130/tick-stock-panel.git` 不含二开改动；若 fork 镜像尚未构建成功，请用方式 B 本地构建。升级基线见 [二次开发与升级基线](./secondary-development.md#0-本仓库二开基线)。
+> 🍴 本文档对应 [657793814/tick-stock-panel](https://github.com/657793814/tick-stock-panel) fork：克隆/镜像地址均为本 fork。上游 `ghcr.io/shy3130/tick-stock-panel:latest` 与 `shy3130/tick-stock-panel.git` 不含二开改动；本 fork 的部署入口是**方式 A 本地构建**，GHCR 镜像只作可选试跑。升级基线见 [二次开发与升级基线](./secondary-development.md#0-本仓库二开基线)。
 
 > 📌 前置依赖(仅方式 D 需要):Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`（`npm i -g pnpm`）
 
 ---
 
-## 方式 A:GHCR 现成镜像(免本地构建,镜像可用时推荐)
+## 方式 A:Docker Compose(本地构建,全套挂载,推荐)
 
-本 fork 推送到 `main` 时由 GitHub Actions 自动构建多架构镜像(linux/amd64 · arm64)并发布到 `ghcr.io/657793814/tick-stock-panel`,直接拉取运行,本地无需 Python / Node,也不用现场 build:
+在仓库根目录执行（`.env` 是 compose 的 `env_file`,首次部署必须先复制）:
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+# 打开 http://localhost:3018
+```
+
+Docker 采用两阶段构建,前端 dist 拷进后端镜像,**单容器**运行,数据落在本仓库 `./data`,完全在自己手里。
+
+> ⚠️ `docker-compose.yml` 把宿主机 `./frontend/dist` 挂载到容器 `/app/static`。改过前端源码时,先执行 `pnpm --dir frontend install && pnpm --dir frontend build` 重建 dist,再执行上面的命令；后端 `.py` 改动只需 `docker compose restart`。老 CPU / vectorbt 需求通过 `.env` 的 `BACKEND_EXTRAS` 自构建。
+
+更新到新版本:
+
+```bash
+git pull
+docker compose up --build -d
+```
+
+---
+
+## 方式 B:GHCR 现成镜像(可选,不保证包含二开)
+
+本 fork 的镜像由 Actions 按 `github.repository` 发布到 `ghcr.io/657793814/tick-stock-panel`,上游 `ghcr.io/shy3130/tick-stock-panel:latest` 不含二开改动。**镜像只用于快速试跑；部署本 fork 请以方式 A 本地构建为准。**
 
 ```bash
 docker run -d --name tsp -p 3018:3018 -e DATA_DIR=/app/data -v "${PWD}/data:/app/data" ghcr.io/657793814/tick-stock-panel:latest
@@ -19,10 +42,9 @@ docker run -d --name tsp -p 3018:3018 -e DATA_DIR=/app/data -v "${PWD}/data:/app
 
 - 需要配置时:从 `.env.example` 复制出 `.env`,命令里加 `--env-file .env`,保留 `-e DATA_DIR=/app/data` 与数据挂载,避免旧镜像把 `DATA_DIR=./data` 解析到未挂载的 `/data`。
 - 自定义绝对数据路径会原样保留,需要把宿主机目录挂载到相同目标。Compose 用户需要同时调整 `environment` 和 `volumes`,仅修改 `.env` 不会覆盖 Compose 中明确指定的路径。
-- 自定义数据源等服务跑在宿主机、容器内需通过 `host.docker.internal` 访问时,Linux 的 `docker run` 要在命令里加 `--add-host=host.docker.internal:host-gateway`(Docker Desktop 的 macOS/Windows 默认已可解析;方式 B 的 compose 已在 `extra_hosts` 配好),否则报 `Name or service not known`。
-- 镜像默认不含 `legacy-cpu` / `backtest` extras —— 老 CPU(无 AVX2)或需要 vectorbt 回测时,请用方式 B 通过 `BACKEND_EXTRAS` 自构建。
+- 自定义数据源等服务跑在宿主机、容器内需通过 `host.docker.internal` 访问时,Linux 的 `docker run` 要在命令里加 `--add-host=host.docker.internal:host-gateway`(Docker Desktop 的 macOS/Windows 默认已可解析;方式 A 的 compose 已在 `extra_hosts` 配好),否则报 `Name or service not known`。
+- 镜像默认不含 `legacy-cpu` / `backtest` extras —— 老 CPU(无 AVX2)或需要 vectorbt 回测时,请用方式 A 通过 `BACKEND_EXTRAS` 自构建。
 - 跑自己再改过的代码:fork 本仓库后到 Actions 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
-- 想要 compose 全套挂载(`.env` / `tiers.yaml` / 数据卷):参考根目录 `docker-compose.yml`,把 `build:` 段换成 `image: ghcr.io/657793814/tick-stock-panel:latest`。
 
 更新到新版本:
 
@@ -36,29 +58,9 @@ docker rm -f tsp
 
 ---
 
-
-## 方式 B:Docker Compose(本地构建,全套挂载)
-
-```bash
-cp .env.example .env
-docker compose up --build
-# 打开 http://localhost:3018
-```
-
-Docker 采用两阶段构建,前端 dist 拷进后端镜像,**单容器**运行,数据完全在自己手里。
-
-更新到新版本:
-
-```bash
-git pull
-docker compose up --build -d
-```
-
----
-
 ## 方式 C:本机 AI 代部署(小白推荐)
 
-装一个本机 AI 编程助手(Trae / Codex / OpenCode / ZCode / WorkBuddy 等,任选其一),把 [README · 快速开始](../README.md#-快速开始) 里方式 C 的提示词原样发给它,AI 会自动完成克隆、装依赖、启动服务。适合完全不想碰命令行的用户;AI 最终执行的仍是方式 A / B / D 之一。
+装一个本机 AI 编程助手(Trae / Codex / OpenCode / ZCode / WorkBuddy 等,任选其一),把 [README · 快速开始](../README.md#-快速开始) 里方式 B 的提示词原样发给它,AI 会自动完成克隆、装依赖、启动服务。适合完全不想碰命令行的用户;AI 最终执行的仍是方式 A / B / D 之一。
 
 ---
 
@@ -122,9 +124,9 @@ vectorbt → numba 体积较大,作为可选 extras(`uv sync --extra backtest`)�
 git pull
 ```
 
-> 用方式 A 镜像直跑(无本地仓库)的用户:`docker pull ghcr.io/657793814/tick-stock-panel:latest` 后删除旧容器重跑;compose 换 `image:` 的用户执行 `docker compose pull && docker compose up -d`。
+> 用方式 B 镜像直跑(无本地仓库)的用户:`docker pull ghcr.io/657793814/tick-stock-panel:latest` 后删除旧容器重跑;compose 换 `image:` 的用户执行 `docker compose pull && docker compose up -d`。
 
-> ⚠️ **方式 A 重建容器时必须保留 `-e DATA_DIR=/app/data` 与原有的宿主机数据目录挂载。** 更换启动目录时,相对的 `${PWD}/data` 也会指向另一份数据;建议使用固定宿主机绝对路径。自定义容器数据目录时,环境变量和挂载目标须一致。
+> ⚠️ **方式 B 重建容器时必须保留 `-e DATA_DIR=/app/data` 与原有的宿主机数据目录挂载。** 更换启动目录时,相对的 `${PWD}/data` 也会指向另一份数据;建议使用固定宿主机绝对路径。自定义容器数据目录时,环境变量和挂载目标须一致。
 
 ### Docker 升级前核对数据目录
 
