@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
@@ -18,6 +19,8 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 router = APIRouter(prefix="/api/intraday", tags=["quotes"])
+
+logger = logging.getLogger(__name__)
 
 
 class QuoteSubscription(BaseModel):
@@ -137,15 +140,100 @@ def index_quotes(
     """返回实时指数行情缓存，不触发 TickFlow 请求。"""
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
     qs = _get_quote_service(request)
-    if not qs:
-        rows = _fallback_index_quotes_from_daily(request, symbol_list)
-        return {"rows": rows, "count": len(rows), "source": "index_daily"}
-    df = qs.get_index_quotes(symbol_list)
-    rows = df.to_dicts() if not df.is_empty() else []
-    if not rows:
-        rows = _fallback_index_quotes_from_daily(request, symbol_list)
-        return {"rows": rows, "count": len(rows), "source": "index_daily"}
-    return {"rows": rows, "count": len(rows), "source": "realtime"}
+    if qs:
+        df = qs.get_index_quotes(symbol_list)
+        rows = df.to_dicts() if not df.is_empty() else []
+        if rows:
+            return {"rows": rows, "count": len(rows), "source": "realtime"}
+    # 实时指数缓存为空时的本地日K兜底: DuckDB 每次都要扫指数分区, 按交易日/休市
+    # 给短/长 TTL 缓存, 同一份结果在侧栏与指数页之间共享。
+    from app import cache_store
+    from app.market_time import in_continuous_session
+
+    cache_key = f"{request.app.state.repo.store.data_dir}|{','.join(sorted(symbol_list)) if symbol_list else 'all'}"
+    cached = cache_store.get_json("intraday-index-fallback", cache_key)
+    if cached is not None:
+        return cached
+    rows = _fallback_index_quotes_from_daily(request, symbol_list)
+    result = {"rows": rows, "count": len(rows), "source": "index_daily"}
+    cache_store.set_json(
+        "intraday-index-fallback", cache_key, result,
+        ttl=10 if in_continuous_session() else 60,
+    )
+    return result
+
+
+@router.get("/ticks")
+async def quote_ticks(request: Request, symbols: str = Query("", description="逗号分隔 symbol, 最多 64 个")):
+    """逐笔行情通道 (SSE): 行情轮询每拍推送订阅标的的最新快照。
+
+    与 /stream 的区别: 只推订阅标的的价格字段, 连接即先发一帧快照,
+    供模拟盘持仓/委托做逐笔闪烁。上游仍是轮询快照 (1~3s), 不是交易所
+    逐笔成交明细 — 那需要 L2/tick 数据源。
+
+    需求租约由前端通过 PUT /api/intraday/subscriptions/{client_id} 维护,
+    本端点只读 QuoteService 内存缓存, 不额外发起上游请求。
+    """
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:64]
+    qs = _get_quote_service(request)
+    import polars as pl
+
+    def snapshot() -> list[dict]:
+        if qs is None or not syms:
+            return []
+        try:
+            df = qs.get_quotes_compat()
+        except Exception as exc:  # noqa: BLE001 — 数据自检未完成时行情快照不可用
+            # 逐笔通道是增强能力, 不能因数据完整性拦截把 SSE 打断
+            logger.debug("ticks snapshot unavailable: %s", exc)
+            return []
+        if df.is_empty():
+            return []
+        keep = [c for c in [
+            "symbol", "close", "prev_close", "change_pct", "change_amount",
+            "open", "high", "low", "volume", "amount",
+        ] if c in df.columns]
+        rows = df.filter(pl.col("symbol").is_in(syms)).select(keep).to_dicts()
+        for r in rows:
+            if "close" in r:
+                r["last_price"] = float(r.pop("close"))
+            for k in ("prev_close", "change_pct", "change_amount", "open", "high", "low", "volume", "amount"):
+                if r.get(k) is not None:
+                    r[k] = float(r[k])
+        return rows
+
+    async def event_generator():
+        # 先发一帧空数据完成握手 (sse-starlette 首帧才 flush 响应头),
+        # 再在线程池里读 enriched 缓存, 避免冷加载阻塞事件循环。
+        yield {
+            "event": "ticks",
+            "data": json.dumps({"ts": int(time.time() * 1000), "quotes": []}, ensure_ascii=False),
+        }
+        rows = await asyncio.to_thread(snapshot)
+        if rows:
+            yield {
+                "event": "ticks",
+                "data": json.dumps({"ts": int(time.time() * 1000), "quotes": rows}, ensure_ascii=False),
+            }
+        if qs is None:
+            while True:
+                await asyncio.sleep(30)
+        sub = qs.subscribe()
+        try:
+            while True:
+                await sub.wait_async(5.0)
+                data = sub.pop()
+                if not data["quote_updated"]:
+                    continue
+                rows = await asyncio.to_thread(snapshot)
+                yield {
+                    "event": "ticks",
+                    "data": json.dumps({"ts": int(time.time() * 1000), "quotes": rows}, ensure_ascii=False),
+                }
+        finally:
+            qs.unsubscribe(sub)
+
+    return EventSourceResponse(event_generator())
 
 
 @router.get("/stream")

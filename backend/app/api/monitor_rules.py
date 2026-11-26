@@ -11,12 +11,15 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app import cache_store
 from app.strategy import monitor_rules
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, uses_intraday_signals
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/monitor-rules", tags=["monitor-rules"])
+
+_RULES_NS = "monitor-rules"
 
 
 def _data_dir(request: Request) -> Path:
@@ -114,7 +117,7 @@ class RuleModel(BaseModel):
     severity: str = "info"    # info | warn | critical
     webhook_url: str = ""     # Webhook 推送地址 (推送到 QMT 等外部软件, 待定)
     webhook_enabled: bool = False  # 兼容老规则 (已由 webhook_channels 取代, 仅做向后兼容读)
-    webhook_channels: list[str] = []  # 合法值: feishu | wecom | custom | email
+    webhook_channels: list[str] = []  # 合法值: feishu | feishu_app | wecom | wecom_bot | custom | email
     message: str = ""
     # abnormal 专属 (异动边缘监控): any | 3d | 10d | 30d
     abnormal_window: str = "any"
@@ -218,6 +221,12 @@ def get_options(request: Request):
 # ── 列表 ───────────────────────────────────────────────
 @router.get("")
 def list_rules(request: Request):
+    # 规则列表会逐条做 asset_type 校正 + 板块/分组校验 (多次查库), 多个页面
+    # 同时打开时开销叠加; 15s 内共享一份结果, 写操作会主动失效。
+    cache_key = str(_data_dir(request))
+    cached = cache_store.get_json(_RULES_NS, cache_key)
+    if cached is not None:
+        return cached
     repo = request.app.state.repo
     rules = [
         _reconcile_index_asset_type(r, repo)
@@ -271,7 +280,9 @@ def list_rules(request: Request):
             pass
     # 按 created_at 倒序
     rules.sort(key=lambda r: r.get("created_at", ""), reverse=True)
-    return {"rules": rules}
+    result = {"rules": rules}
+    cache_store.set_json(_RULES_NS, cache_key, result, ttl=15)
+    return result
 
 
 # ── 新建 / 更新 ────────────────────────────────────────

@@ -13,6 +13,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app import cache_store
 from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
 from app.services.data_status_cache import DataStatusCache
@@ -161,6 +162,11 @@ _status_cache = DataStatusCache({**_TABLE_TTLS, "storage": 60.0, "last_runs": fl
 def invalidate_data_cache(table: str | None = None, *, discard_stale: bool = False) -> None:
     """写入后标记统计过期; 普通刷新保留旧快照, 清空数据时丢弃旧值。"""
     _status_cache.invalidate(table, discard_stale=discard_stale)
+    # 跨进程共享的 Redis 层: 数据落盘后同步失效按市场切分的画像缓存。
+    from app import cache_store
+
+    cache_store.invalidate_namespace("market-status")
+    cache_store.invalidate_namespace("intraday-index-fallback")
 
 
 def invalidate_storage_cache() -> None:
@@ -634,6 +640,68 @@ def _data_pipeline_busy(request: Request) -> bool:
     if not getattr(request.app.state, "indicators_ready", True):
         return True
     return job_store.active_status() in ("pending", "running")
+
+
+@router.get("/market-status")
+def market_status(request: Request, market: str = "cn") -> dict:
+    """按市场返回本地数据画像（标的总数/日K标的数/最新日期）。
+
+    港美股与 A 股共用日K存储，data/status 的聚合是全市场合计，无法回答
+    「切到港股为什么是空的」。此端点按 symbol 后缀切分后给出该市场自己的
+    规模与最新交易日，前端据此决定显示数据概览还是「同步数据」引导。
+    """
+    from app.markets import ALL_MARKETS
+    from app.services.market_data_status import market_data_status
+
+    if market not in ALL_MARKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法市场 '{market}', 支持: {', '.join(ALL_MARKETS)}",
+        )
+    data_dir = request.app.state.repo.store.data_dir
+    cache_key = f"{market}:{data_dir}"
+    result = cache_store.get_json("market-status", cache_key)
+    if result is None:
+        # 只缓存昂贵的分区扫描; 同步时点(上次/下次)每次现算, 同步结束后立即可见。
+        result = market_data_status(data_dir, market)
+        cache_store.set_json("market-status", cache_key, result, ttl=60)
+    else:
+        result = dict(result)
+    # 同步时点: 让侧栏状态条显示「上次/下次同步」。next 直接读 APScheduler,
+    # last 从 job_store 找该市场最近一次成功同步(A 股 result 无 market 字段,
+    # 用 daily_days 识别; 港美股 result 带 market, 精确匹配)。
+    scheduler = getattr(request.app.state, "scheduler", None)
+    job_id = "daily_pipeline" if market == "cn" else f"market_sync_{market}"
+    result["next_sync_run"] = _next_cron_run(scheduler, job_id)
+    result["last_sync_run"] = _last_market_sync_run(market)
+    return result
+
+
+def _last_market_sync_run(market: str) -> str | None:
+    """该市场最近一次同步完成时间。
+
+    港美股: 用同步账本 .market_sync_{market}.json 的 mtime —— 它只在成功
+    upsert 日K后写(见 daily_pipeline._save_synced_symbols), 比 job_store 记录
+    更贴近真实落盘时间, 且不依赖 result 格式。A 股无此账本, 走 job_store。
+    """
+    from datetime import datetime, timezone
+
+    from app.config import settings
+
+    if market != "cn":
+        ledger = settings.data_dir / f".market_sync_{market}.json"
+        if ledger.exists():
+            return datetime.fromtimestamp(
+                ledger.stat().st_mtime, timezone.utc,
+            ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        return None
+    for job in job_store.list_recent(limit=50):
+        if job.get("status") != "succeeded":
+            continue
+        result = job.get("result") or {}
+        if isinstance(result, dict) and "daily_days" in result:
+            return job.get("finished_at")
+    return None
 
 
 @router.get("/status")

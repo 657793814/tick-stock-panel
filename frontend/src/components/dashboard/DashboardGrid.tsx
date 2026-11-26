@@ -15,7 +15,7 @@
  * - onLayoutChange 仅编辑态提交(挂载期 RGL 的规范化回调被忽略, 避免
  *   非编辑状态下布局意外写回)。
  */
-import { useCallback, useMemo, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import GridLayout, { useContainerWidth, setTransform, type Layout } from 'react-grid-layout'
 import { getPageScale } from '@/lib/pageZoom'
 
@@ -57,6 +57,46 @@ export interface DashboardGridProps {
 export function DashboardGrid({ ctx, items, onItemsChange, editing }: DashboardGridProps) {
   const { width, containerRef, mounted } = useContainerWidth({ measureBeforeMount: true })
 
+  // ===== 卡片交互：指针跟随高光 + 轻微 3D 视差 =====
+  // 直接写 CSS 变量与 class（不进 state），每帧只改样式，不触发 React 重渲染；
+  // 数值都很小（±2deg / 高光半径 260px），保证是「有生命感」而不是晃动。
+  const tiltElRef = useRef<HTMLElement | null>(null)
+
+  const resetTilt = useCallback(() => {
+    const el = tiltElRef.current
+    if (!el) return
+    el.classList.remove('tf-tilt')
+    el.style.removeProperty('--tf-rx')
+    el.style.removeProperty('--tf-ry')
+    tiltElRef.current = null
+  }, [])
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (editing || e.pointerType === 'touch') return
+    const item = (e.target as HTMLElement | null)?.closest('.react-grid-item') as HTMLElement | null
+    if (!item) {
+      resetTilt()
+      return
+    }
+    const rect = item.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
+    const mx = (e.clientX - rect.left) / rect.width
+    const my = (e.clientY - rect.top) / rect.height
+    item.style.setProperty('--tf-mx', `${(mx * 100).toFixed(2)}%`)
+    item.style.setProperty('--tf-my', `${(my * 100).toFixed(2)}%`)
+    const inner = item.firstElementChild as HTMLElement | null
+    if (!inner) return
+    if (tiltElRef.current && tiltElRef.current !== inner) resetTilt()
+    tiltElRef.current = inner
+    inner.classList.add('tf-tilt')
+    inner.style.setProperty('--tf-ry', `${((mx - 0.5) * 4).toFixed(2)}deg`)
+    inner.style.setProperty('--tf-rx', `${((0.5 - my) * 4).toFixed(2)}deg`)
+  }, [editing, resetTilt])
+
+  useEffect(() => {
+    if (editing) resetTilt()
+  }, [editing, resetTilt])
+
   const rglLayout = useMemo(
     () => items.map(it => {
       const min = minSizeOf(it.t)
@@ -89,7 +129,13 @@ export function DashboardGrid({ ctx, items, onItemsChange, editing }: DashboardG
   const isMobile = mounted && width < 768
 
   return (
-    <div ref={containerRef as unknown as React.RefObject<HTMLDivElement>} className={cn('dash-grid relative', editing && 'dash-grid-editing')}>
+    <div
+      ref={containerRef as unknown as React.RefObject<HTMLDivElement>}
+      className={cn('dash-grid tf-neon-grid relative', editing && 'dash-grid-editing')}
+      onPointerMove={handlePointerMove}
+      onPointerLeave={resetTilt}
+      onPointerCancel={resetTilt}
+    >
       {/* 编辑态操作提示 (入口与控制组在页面头部「重载」右侧) */}
       {editing && (
         <div className="mb-1.5 text-[11px] text-muted">

@@ -54,7 +54,14 @@ class QuoteDemand:
         if cached is None or cached[0] != signature:
             # Disk IO stays outside the lease lock; all page readers share this worker.
             try:
-                saved = frozenset(r["symbol"] for r in watchlist.list_symbols() if r.get("symbol"))
+                # 这条需求链只服务 A 股实时行情 (快照 + 逐笔), 港美股自选混进来只会
+                # 让订阅表里挂一批永远匹配不到行情的 symbol。
+                from app.markets import market_of
+
+                saved = frozenset(
+                    r["symbol"] for r in watchlist.list_symbols()
+                    if r.get("symbol") and market_of(str(r["symbol"])) == "cn"
+                )
             except Exception:  # noqa: BLE001 -- a broken watchlist must not stop market/detail quotes
                 logger.warning("自选订阅读取失败，保留上一份有效清单", exc_info=True)
                 saved = cached[1] if cached else frozenset()

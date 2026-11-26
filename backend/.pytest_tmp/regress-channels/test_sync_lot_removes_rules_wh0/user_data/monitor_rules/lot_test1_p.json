@@ -1,0 +1,44 @@
+{
+  "id": "lot_test1_p",
+  "name": "批次止盈止损 · 600519.SH",
+  "type": "price",
+  "asset_type": "stock",
+  "scope": "symbols",
+  "symbols": [
+    "600519.SH"
+  ],
+  "conditions": [
+    {
+      "field": "close",
+      "op": ">=",
+      "value": 1650.0
+    },
+    {
+      "field": "close",
+      "op": "<=",
+      "value": 1425.0
+    }
+  ],
+  "logic": "or",
+  "cooldown_seconds": 86400,
+  "severity": "warn",
+  "message": "批次止盈止损 · 成本1500 · 止盈10% · 止损5% · 100股 · 收盘价>=1650.0 或 收盘价<=1425.0",
+  "enabled": true,
+  "lot_id": "lot_test1",
+  "webhook_channels": [],
+  "created_at": "2026-11-23T13:57:50.865405+00:00",
+  "group_id": null,
+  "sector": null,
+  "sector_kind": null,
+  "sector_targets": [],
+  "sector_trigger": "change_pct",
+  "threshold_pct": 1.0,
+  "window_minutes": 5,
+  "strategy_id": null,
+  "direction": "entry",
+  "metric": "sealed_vol",
+  "threshold": 0,
+  "abnormal_window": "any",
+  "webhook_url": "",
+  "webhook_enabled": false
+}

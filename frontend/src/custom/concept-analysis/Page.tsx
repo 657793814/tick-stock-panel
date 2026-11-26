@@ -14,6 +14,8 @@ import {
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
+import { MarketNotSupportedHint } from '@/components/MarketNotSupported'
+import { useMarket } from '@/lib/market'
 import { AnalysisConfigDialog, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toNavItems, type NavItem } from '@/lib/listNav'
@@ -243,6 +245,7 @@ function statSort(mode: SortMode) {
 }
 
 export function ConceptAnalysis() {
+  const { market } = useMarket()
   const [fieldConfig, setFieldConfig] = useState<AnalysisFieldConfig>(loadConfig)
   const [showConfig, setShowConfig] = useState(false)
   const [search, setSearch] = useState('')
@@ -289,8 +292,8 @@ export function ConceptAnalysis() {
     !rowsQuery.isLoading && (rowsQuery.data?.total ?? 0) === 0
 
   const marketQuery = useQuery({
-    queryKey: QK.marketSnapshot,
-    queryFn: api.marketSnapshot,
+    queryKey: QK.marketSnapshot(market),
+    queryFn: () => api.marketSnapshot(market),
     staleTime: 60_000,
   })
 
@@ -335,6 +338,15 @@ export function ConceptAnalysis() {
     setFieldConfig(c)
     saveConfig(c)
     setSelectedKey(null)
+  }
+
+  if (market !== 'cn') {
+    return (
+      <div className="min-h-full bg-base">
+        <PageHeader title="概念板块" />
+        <MarketNotSupportedHint pageName="概念板块" reason="港美股暂无同花顺概念分类扩展数据" />
+      </div>
+    )
   }
 
   if (configsQuery.isLoading) {

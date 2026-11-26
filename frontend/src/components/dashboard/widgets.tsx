@@ -12,6 +12,7 @@ import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type Overv
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { dimensionKindForSourceField, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { cn } from '@/lib/cn'
+import { marketOfSymbol } from '@/lib/market'
 import { cnSignal } from '@/lib/signals'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
@@ -37,7 +38,7 @@ export function IndexTicker({ item }: { item: OverviewMarket['indices'][number] 
   return (
     <Link
       to={`/indices?symbol=${encodeURIComponent(item.symbol)}`}
-      className="grid min-w-0 grid-cols-[1fr_auto] items-center gap-x-2 gap-y-0.5 rounded-lg border border-border bg-elevated/45 px-1.5 py-1 shadow-[0_1px_1px_hsl(var(--border)/0.3)] backdrop-blur-sm transition-all hover:border-accent/40 hover:bg-elevated hover:shadow-[0_2px_6px_hsl(var(--accent)/0.15)]"
+      className={`tf-index-cell group grid min-w-0 grid-cols-[1fr_auto] items-center gap-x-2 gap-y-0.5 rounded-lg border border-border bg-elevated/45 px-2 py-1 shadow-[0_1px_1px_hsl(var(--border)/0.3)] backdrop-blur-sm transition-all hover:border-accent/40 hover:bg-elevated hover:shadow-[0_2px_6px_hsl(var(--accent)/0.15)] ${isUp ? 'is-up' : 'is-down'}`}
     >
       <div className="truncate text-xs font-medium text-foreground">{item.name || item.symbol}</div>
       <div className={`font-mono text-xs font-semibold ${pctClass(pct)}`}>{fmtIndexPct(pct)}</div>
@@ -127,7 +128,8 @@ export function EmotionRadar({ radar, score }: { radar: OverviewMarket['radar'];
     }).join(' '),
   }))
   return (
-    <div className="flex justify-center">
+    <div className="relative flex justify-center">
+      <span className="tf-radar-sweep" aria-hidden />
       <svg viewBox={`0 0 ${size} ${size}`} className="h-56 w-full">
         <defs>
           <radialGradient id="emotionRadarFill" cx="50%" cy="45%" r="70%">
@@ -163,23 +165,24 @@ export function EmotionRadar({ radar, score }: { radar: OverviewMarket['radar'];
   )
 }
 
-// ===== 涨停梯队 =====
-export function LadderMini({ limit }: { limit: OverviewMarket['limit'] }) {
+// ===== 涨停梯队 / 港美股强度梯队 =====
+export function LadderMini({ limit, market = 'cn' }: { limit: OverviewMarket['limit']; market?: 'cn' | 'hk' | 'us' }) {
   const tiers = limit.tiers.filter(t => t.boards >= 2).slice(0, 6)
+  const isCn = market === 'cn'
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between rounded bg-elevated/55 px-2 py-1.5 text-[11px]">
-        <span className="text-muted">封板率</span>
-        <span className="font-mono text-accent">{(limit.seal_rate ?? 0).toFixed(0)}%</span>
+        <span className="text-muted">{isCn ? '封板率' : '动量强度'}</span>
+        <span className="font-mono text-accent">{isCn ? `${(limit.seal_rate ?? 0).toFixed(0)}%` : `${limit.limit_up} 新高`}</span>
       </div>
-      {tiers.length === 0 && <div className="rounded border border-dashed border-border py-5 text-center text-xs text-muted">暂无 2 板以上</div>}
+      {tiers.length === 0 && <div className="rounded border border-dashed border-border py-5 text-center text-xs text-muted">{isCn ? '暂无 2 板以上' : '暂无强动量标的'}</div>}
       {tiers.map(t => {
         const stocks = t.stocks ?? []
         const showStocks = stocks.length > 0 && stocks.length <= 3
         return (
           <div key={t.boards} className="rounded bg-elevated/35 px-2 py-1.5">
             <div className="grid grid-cols-[42px_1fr_auto] items-center gap-2">
-              <span className={`font-mono text-sm font-bold ${t.boards >= 5 ? 'text-bull' : t.boards >= 3 ? 'text-accent' : 'text-secondary'}`}>{t.boards}板</span>
+              <span className={`font-mono text-sm font-bold ${t.boards >= 5 ? 'text-bull' : t.boards >= 3 ? 'text-accent' : 'text-secondary'}`}>{t.boards}{isCn ? '板' : '档'}</span>
               <div className="h-1.5 overflow-hidden rounded-full bg-base">
                 <div className="h-full rounded-full bg-bull/70" style={{ width: `${Math.min(100, t.count * 12)}%` }} />
               </div>
@@ -203,12 +206,12 @@ export function LadderMini({ limit }: { limit: OverviewMarket['limit'] }) {
 
 // ===== 四大榜单 =====
 export function StockList({ title, rows, mode, onStockClick, activeSymbol }: {
-  title: string; rows: MarketSnapshotRow[]; mode: 'gain' | 'loss' | 'amount' | 'active';
+  title: string; rows: MarketSnapshotRow[]; mode: 'gain' | 'loss' | 'amount' | 'active' | 'volume';
   onStockClick?: (symbol: string, name?: string) => void;
   activeSymbol?: string;
 }) {
   return (
-    <div className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
+    <div className="tf-widget rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
       <div className="mb-1 flex items-center justify-between">
         <h3 className="text-xs font-semibold text-foreground">{title}</h3>
         <span className="text-[9px] text-muted">TOP {Math.min(rows.length, 8)}</span>
@@ -217,7 +220,7 @@ export function StockList({ title, rows, mode, onStockClick, activeSymbol }: {
         {rows.slice(0, 8).map((r, idx) => (
           <div
             key={`${r.symbol}-${idx}`}
-            className={`grid grid-cols-[18px_1fr_auto] items-center gap-1.5 rounded-md px-1.5 py-1 cursor-pointer transition-colors border ${r.symbol === activeSymbol ? 'bg-accent/10 border-accent/30' : 'bg-elevated/40 border-transparent hover:bg-elevated hover:brightness-110 hover:border-border/60'}`}
+            className={`tf-row grid grid-cols-[18px_1fr_auto] items-center gap-1.5 rounded-md px-1.5 py-1 cursor-pointer transition-colors border ${r.symbol === activeSymbol ? 'bg-accent/10 border-accent/30' : 'bg-elevated/40 border-transparent hover:bg-elevated hover:brightness-110 hover:border-border/60'}`}
             onClick={() => onStockClick?.(r.symbol, r.name ?? undefined)}
           >
             <span className="text-center font-mono text-[10px] text-muted">{idx + 1}</span>
@@ -244,6 +247,11 @@ export function StockList({ title, rows, mode, onStockClick, activeSymbol }: {
               ) : mode === 'active' ? (
                 <>
                   <div className="font-mono text-[11px] text-accent">{fmtPrice(r.turnover_rate, 1)}%</div>
+                  <div className={`font-mono text-[9px] ${pctClass(r.change_pct)}`}>{fmtStockPct(r.change_pct)}</div>
+                </>
+              ) : mode === 'volume' ? (
+                <>
+                  <div className="font-mono text-[11px] text-accent">{fmtPrice(r.vol_ratio_5d, 2)}x</div>
                   <div className={`font-mono text-[9px] ${pctClass(r.change_pct)}`}>{fmtStockPct(r.change_pct)}</div>
                 </>
               ) : (
@@ -339,7 +347,7 @@ export function HotRankCard({ title, rank, configUrl, onStockClick, onDimensionC
 }) {
   const hasData = (rank?.leading?.length ?? 0) > 0 || (rank?.lagging?.length ?? 0) > 0
   return (
-    <section className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
+    <section className="tf-widget rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
       <SectionTitle icon={Flame} title={title} hint="领涨/领跌 · 点击板块看成分股" />
       {hasData ? (
         <div className="grid grid-cols-2 gap-2">
@@ -376,9 +384,11 @@ const _SEVERITY_BAR: Record<string, string> = {
   info: 'bg-accent/40', warn: 'bg-warning', critical: 'bg-danger',
 }
 
-export function MonitorWidget({ onStockClick, activeSymbol }: {
+export function MonitorWidget({ onStockClick, activeSymbol, market }: {
   onStockClick: (event: AlertEvent, navList?: NavItem[]) => void
   activeSymbol?: string
+  /** 告警本身不区分市场；看板按当前市场过滤，避免港美股页出现 A 股触发记录。 */
+  market?: 'cn' | 'hk' | 'us'
 }) {
   const navigate = useNavigate()
   const customNames = useCustomSignalNames()
@@ -387,13 +397,19 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
     queryFn: () => api.alertsList({ days: 7, limit: 10 }),
     refetchInterval: 10000,
   })
-  const events: AlertEvent[] = alerts.data?.alerts ?? []
+  const allEvents: AlertEvent[] = alerts.data?.alerts ?? []
+  const events: AlertEvent[] = !market || market === 'cn'
+    ? allEvents
+    : allEvents.filter(ev => !!ev.symbol && marketOfSymbol(ev.symbol) === market)
   // 切股导航列表: 有 symbol 的触发记录
   const alertNav = toNavItems(events.filter((ev): ev is AlertEvent & { symbol: string } => !!ev.symbol))
 
   if (events.length === 0) {
     return (
-      <div className="mt-1 py-6 text-center text-[11px] text-muted">暂无触发记录</div>
+      <div className="tf-empty-hud mt-1 flex min-h-[96px] flex-col items-center justify-center gap-2 py-6 text-[11px] text-muted">
+        <span className="tf-radar" aria-hidden />
+        <span className="tracking-[0.18em]">SIGNAL SCAN · 暂无触发记录</span>
+      </div>
     )
   }
 

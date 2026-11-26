@@ -37,7 +37,12 @@ from app.enriched_generation import (
     get_enriched_generation_snapshot,
 )
 from app.market_time import CN_TZ, cn_today
-from app.parquet import scan_enriched_parquet
+from app.parquet import (
+    DAILY_STORAGE_SCHEMA,
+    ENRICHED_STORAGE_SCHEMA,
+    align_storage_dtypes,
+    scan_enriched_parquet,
+)
 from app.polars_guard import guarded_collect
 from app.services.minute_adjust import apply_minute_adjustment, minute_basis_is_raw
 from app.startup_diagnostics import startup_phase
@@ -361,6 +366,10 @@ class KlineRepository:
         self._live_agg_check_date: date | None = None          # 上次跨日校验时的 today (快路径节流)
         self._instruments_cache: pl.DataFrame | None = None
         self._name_map_cache: dict[str, str] | None = None
+        # 港美股维表 / 名称表: 读取要 pl.read_parquet (美股 1.2 万行), 搜索/自选是
+        # 每键一请求的热路径, 必须 memo。随 refresh_cache 失效 (同步后立刻可见)。
+        self._market_instruments_cache: dict[str, pl.DataFrame] = {}
+        self._market_name_cache: dict[str, dict[str, str]] = {}
         self._historical_shares_cache: pl.DataFrame | None = None
         self._historical_shares_mtime_ns: int | None = None
         # 完整 enriched 历史 (含所有指标, 供 filter_history 策略使用)
@@ -504,6 +513,15 @@ class KlineRepository:
 
         logger.info("cache refresh done (%.2fs)", time.perf_counter() - started)
 
+    @property
+    def enriched_warming(self) -> bool:
+        """后台 enriched 预热是否进行中。
+
+        预热本身要在内存里算全历史宽表; 此时再叠加一次看板全量重算会把容器
+        顶到 OOM (3.8GiB 上限)。API 层据此快速返回「预热中」, 让前端重试。
+        """
+        return bool(self._enriched_warming)
+
     def _start_enriched_warmup(self) -> None:
         """启动后台 daemon 线程预热 enriched 缓存 (compute_indicators)。
 
@@ -588,6 +606,8 @@ class KlineRepository:
         self._index_symbol_set_cache = None
         self._etf_symbol_set_cache = None
         self._name_map_cache = None
+        self._market_instruments_cache = {}
+        self._market_name_cache = {}
         self._index_enriched_cache = None
         self._index_enriched_cache_date = None
 
@@ -676,13 +696,17 @@ class KlineRepository:
                 from datetime import timedelta
 
                 from app.indicators.pipeline import compute_enriched_history_window
+                from app.markets import symbol_filter_expr
+
                 start_full = latest - timedelta(days=300)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                          "volume", "amount", "quote_ts", "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
+                # 这份缓存只服务 A 股; 把市场过滤下推到 scan, 避免先把港美股
+                # 300 天历史整表收进内存再丢弃 (启动期内存峰值的主要来源之一)。
                 lf = (
                     scan_enriched_parquet(self._enriched_glob)
-                    .filter(pl.col("date") >= start_full)
+                    .filter((pl.col("date") >= start_full) & symbol_filter_expr("cn"))
                     .sort(["symbol", "date"])
                 )
 
@@ -691,6 +715,12 @@ class KlineRepository:
                 df_hist = guarded_collect(lf.select(read_cols), priority="background")
                 logger.info("enriched refresh step done: collect history rows=%d (%.2fs)", len(df_hist), time.perf_counter() - step)
                 if not df_hist.is_empty():
+                    # 这份缓存是「A 股最新/历史快照」, 供选股、异动、RPS 等 cn 路径复用。
+                    # 共享存储里还躺着港美股行: 不切分会让 A 股缓存混入其它市场, 且
+                    # 指标计算被无关标的拖慢。港美股走 ScreenerService 的按市场慢路径。
+                    from app.markets import filter_symbols
+
+                    df_hist = filter_symbols(df_hist, "cn")
                     instruments = self._instruments_cache if self._instruments_cache is not None else pl.DataFrame()
 
                     # 分批计算并关联元数据, 保留完整历史, 限制宽表临时副本。
@@ -1132,7 +1162,7 @@ class KlineRepository:
                          if c in df_latest.columns]
             df_hist = guarded_collect(
                 scan_enriched_parquet(self._etf_enriched_glob,
-                                cast_options=pl.ScanCastOptions(integer_cast="allow-float"))
+                                cast_options=pl.ScanCastOptions(integer_cast="upcast"))
                 .filter(pl.col("date") >= start_full)
                 .select(read_cols)
                 .sort(["symbol", "date"]),
@@ -1176,7 +1206,7 @@ class KlineRepository:
                          if c in df_latest.columns]
             df_hist = guarded_collect(
                 scan_enriched_parquet(self._index_enriched_glob,
-                                cast_options=pl.ScanCastOptions(integer_cast="allow-float"))
+                                cast_options=pl.ScanCastOptions(integer_cast="upcast"))
                 .filter(pl.col("date") >= start_full)
                 .select(read_cols)
                 .sort(["symbol", "date"]),
@@ -1514,6 +1544,50 @@ class KlineRepository:
             return self.get_etf_instruments()
         return pl.DataFrame()
 
+    def get_instruments_market(self, market: str = "cn") -> pl.DataFrame:
+        """按市场读取个股维表（港美股读 instruments_index_{market}/instruments.parquet）。
+
+        cn 走既有共享 instruments 池（避免改动 A 股写入路径）；港美股单独存放，
+        既避免污染 A 股 stock 池，也避免多市场维表挤在同一张表里。
+        """
+        # 局部导入: repository 是热路径模块, 不为一个常量把 app.markets 拉进导入期。
+        from app.markets import MARKET_CN
+
+        if market == MARKET_CN:
+            return self.get_instruments()
+        cached = self._market_instruments_cache.get(market)
+        if cached is not None:
+            return cached
+        path = self.store.data_dir / f"instruments_index_{market}" / "instruments.parquet"
+        if path.exists():
+            cached = pl.read_parquet(path)
+        else:
+            cached = pl.DataFrame()
+        # 空表也缓存: 未同步时每次搜索都会 stat 一遍目录, 而「没数据」是最常见的初态。
+        self._market_instruments_cache[market] = cached
+        return cached
+
+    def get_market_name_map(self, market: str = "cn") -> dict[str, str]:
+        """{symbol: name} 按市场解析。
+
+        cn 走 get_name_map（股票+ETF+指数合并, 有独立缓存）; 港美股只有个股维表,
+        名称就在 instruments_index_{market} 里。
+        """
+        from app.markets import MARKET_CN
+
+        if market == MARKET_CN:
+            return self.get_name_map()
+        cached = self._market_name_cache.get(market)
+        if cached is not None:
+            return cached
+        df = self.get_instruments_market(market)
+        name_map: dict[str, str] = {}
+        if not df.is_empty() and {"symbol", "name"}.issubset(df.columns):
+            for symbol, name in df.select(["symbol", "name"]).iter_rows():
+                name_map[str(symbol)] = name
+        self._market_name_cache[market] = name_map
+        return name_map
+
     def get_index_symbol_set(self) -> set[str]:
         """返回已缓存指数 symbol 集合 (memo, 随 instruments 缓存失效)。"""
         if self._index_symbol_set_cache is None:
@@ -1589,6 +1663,13 @@ class KlineRepository:
     ) -> pl.DataFrame:
         """单股日K查询 — 从14列parquet读取后即时计算指标。"""
         from datetime import timedelta
+
+        from app.markets import market_of
+
+        # 港美股不走 A 股内存快照: _enriched_history_cache 是 A 股口径的 300 天窗口,
+        # 里面即便混进港美股行也只是最新一天 (1 行)。一旦命中它, 下面 "有缓存就不再
+        # 扫描" 的判断会把整段历史截成 1 根 K, 详情页只剩今天、均线全空。
+        is_cn = market_of(symbol) == "cn"
         self._assert_daily_usable(symbols=[symbol], end=end)
 
         # 快路径: 请求的列全是 parquet 直接存储的列 (如迷你蜡烛图只要 OHLCV) →
@@ -1616,7 +1697,7 @@ class KlineRepository:
         # 指标重算是热路径上最大的重复计算。缓存最新日可能不含当日实时行,
         # 由下方 get_enriched_latest 覆盖逻辑补齐; 覆盖不足时回退单股计算路径。
         df = pl.DataFrame()
-        hist = self._enriched_history_cache
+        hist = self._enriched_history_cache if is_cn else None
         if hist is not None and not hist.is_empty() and "date" in hist.columns:
             hist_min = self._enriched_history_start
             hist_max = hist["date"].max()
@@ -1632,8 +1713,10 @@ class KlineRepository:
             if not df.is_empty():
                 df = self._compute_enriched_range(df)
 
-        # 尝试用缓存数据覆盖最新日 (盘中更准确)
-        cached, cache_date = self.get_enriched_latest(symbols=[symbol], end=end)
+        # 尝试用缓存数据覆盖最新日 (盘中更准确)。
+        # 只对 A 股: 港美股的最新日缓存来自 14 列存储表, 覆盖会把已经算好的
+        # 均线/换手率换成 null (这一点曾在港股详情页表现为「最后一根 K 无指标」)。
+        cached, cache_date = self.get_enriched_latest(symbols=[symbol], end=end) if is_cn else (None, None)
         if not df.is_empty() and cached is not None and not cached.is_empty() and cache_date:
             if start <= cache_date <= end:
                 cached_part = self._filter_cached(cached, symbol, None)
@@ -1660,9 +1743,13 @@ class KlineRepository:
         columns: list[str] | None = None,
     ) -> pl.DataFrame:
         """批量日K查询。"""
+        from app.markets import market_of
+
+        # 同 get_daily: 港美股不命中 A 股内存快照 (只有最新一天的行), 直接走扫描。
+        is_cn = all(market_of(s) == "cn" for s in symbols)
         self._assert_daily_usable(symbols=symbols, end=end)
         cached, cache_date = self.get_enriched_latest(symbols=symbols, end=end)
-        if cached is not None and not cached.is_empty() and cache_date:
+        if is_cn and cached is not None and not cached.is_empty() and cache_date:
             if start >= cache_date:
                 return self._filter_cached_batch(cached, symbols, columns)
 
@@ -1670,7 +1757,7 @@ class KlineRepository:
         # 自选迷你蜡烛窗口 (days≤60) 完全落在缓存内, 免整树 glob 扫描;
         # 覆盖不足 (窗口早于缓存起点 / symbol 不在缓存) 时回退扫描路径。
         df = pl.DataFrame()
-        hist = self._enriched_history_cache
+        hist = self._enriched_history_cache if is_cn else None
         if hist is not None and not hist.is_empty() and "date" in hist.columns:
             hist_min = self._enriched_history_start
             hist_max = hist["date"].max()
@@ -1683,7 +1770,7 @@ class KlineRepository:
 
         if not df.is_empty():
             # 用实时缓存覆盖最新日 (与单股 get_daily 的覆盖逻辑同口径)
-            if cached is not None and not cached.is_empty() and cache_date and start <= cache_date <= end:
+            if is_cn and cached is not None and not cached.is_empty() and cache_date and start <= cache_date <= end:
                 cached_part = self._filter_cached_batch(cached, symbols, None)
                 if not cached_part.is_empty():
                     df = df.filter(pl.col("date") != cache_date)
@@ -1930,28 +2017,47 @@ class KlineRepository:
     # ================================================================
 
     def _compute_enriched_range(self, df: pl.DataFrame) -> pl.DataFrame:
-        """对14列enriched数据即时计算完整指标+信号。输入应含足够预热行数。"""
-        from app.indicators.pipeline import (
-            compute_indicators,
-            compute_limit_signals,
-            compute_signals,
-            filter_halt_days,
-        )
+        """对14列enriched数据即时计算完整指标+信号。输入应含足够预热行数。
+
+        按 symbol 判定市场: 港美股跳过涨跌停/连板 (也不塞 A 股 instruments),
+        走 compute_all(market=...) 的统一口径, 顺带补换手率并把连板列写成
+        UInt32, 与存储 schema 一致。
+        """
+        from app.indicators.pipeline import compute_all, filter_halt_days
+        from app.markets import market_of
+
         if df.is_empty() or df.height < 2:
             return df
         # 兜底过滤历史脏数据中的停牌日 (close 可能被填充为前收盘价)
         df = filter_halt_days(df)
         if df.is_empty() or df.height < 2:
             return df
+        market = market_of(str(df["symbol"][0])) if "symbol" in df.columns else "cn"
         try:
-            df = compute_indicators(df)
-            df = compute_signals(df)
-            instruments = self.get_instruments()
-            df = compute_limit_signals(
-                df,
-                instruments,
-                historical_shares=self.get_historical_shares(),
-            )
+            if market == "cn":
+                # A 股保持原链路 (列与口径零变化): 指标 → 信号 → 涨跌停/连板。
+                from app.indicators.pipeline import (
+                    compute_indicators,
+                    compute_limit_signals,
+                    compute_signals,
+                )
+
+                df = compute_indicators(df)
+                df = compute_signals(df)
+                df = compute_limit_signals(
+                    df,
+                    self.get_instruments(),
+                    historical_shares=self.get_historical_shares(),
+                )
+            else:
+                # 港美股: 无涨跌停语义, 走 compute_all(market=...) 统一口径
+                # (补换手率、连板列恒 0 且为 UInt32)。
+                df = compute_all(
+                    df,
+                    instruments=self.get_instruments(),
+                    historical_shares=self.get_historical_shares(),
+                    market=market,
+                )
         except Exception as e:  # noqa: BLE001
             logger.warning("on-demand compute failed: %s", e)
         return df
@@ -1985,7 +2091,7 @@ class KlineRepository:
     def _scan_daily_symbol(self, symbol: str, start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
             lf = scan_enriched_parquet(self._enriched_glob,
-                                 cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
+                                 cast_options=pl.ScanCastOptions(integer_cast="upcast")).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("date") >= start)
                 & (pl.col("date") <= end)
@@ -2002,7 +2108,7 @@ class KlineRepository:
     def _scan_daily_batch(self, symbols: list[str], start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
             lf = scan_enriched_parquet(self._enriched_glob,
-                                 cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
+                                 cast_options=pl.ScanCastOptions(integer_cast="upcast")).filter(
                 (pl.col("symbol").is_in(symbols))
                 & (pl.col("date") >= start)
                 & (pl.col("date") <= end)
@@ -2019,7 +2125,7 @@ class KlineRepository:
     def _scan_index_daily_symbol(self, symbol: str, start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
             lf = scan_enriched_parquet(self._index_enriched_glob,
-                                 cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
+                                 cast_options=pl.ScanCastOptions(integer_cast="upcast")).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("date") >= start)
                 & (pl.col("date") <= end)
@@ -2036,7 +2142,7 @@ class KlineRepository:
     def _scan_etf_daily_symbol(self, symbol: str, start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
             lf = scan_enriched_parquet(self._etf_enriched_glob,
-                                 cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
+                                 cast_options=pl.ScanCastOptions(integer_cast="upcast")).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("date") >= start)
                 & (pl.col("date") <= end)
@@ -2599,6 +2705,9 @@ class KlineRepository:
     def _write_daily_partition(self, df: pl.DataFrame, table: str) -> None:
         """按 date 分区写入 parquet，每个日期一个文件，支持 merge-upsert。"""
         base = self.store.data_dir / table
+        # 落盘前按存储契约归一量价类型: 实时快照/数据源可能给出整型 volume,
+        # 与历史 Float64 分区混存后, 之后按 schema 扫描整张表会直接 SchemaError。
+        schema = ENRICHED_STORAGE_SCHEMA if table.endswith("_enriched") else DAILY_STORAGE_SCHEMA
         generation_asset = {
             "kline_daily_enriched": "stock",
             "kline_etf_enriched": "etf",
@@ -2615,7 +2724,7 @@ class KlineRepository:
             ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
             out = base / f"date={ds}" / "part.parquet"
             out.parent.mkdir(parents=True, exist_ok=True)
-            self._optimistic_upsert_partition(out, date_df, publication)
+            self._optimistic_upsert_partition(out, date_df, publication, schema=schema)
 
     @staticmethod
     def _partition_fingerprint(path: Path) -> tuple[int, int] | None:
@@ -2632,6 +2741,7 @@ class KlineRepository:
         incoming: pl.DataFrame,
         publication: EnrichedPublication | None,
         *,
+        schema: dict[str, pl.DataType] | None = None,
         retries: int = 3,
     ) -> None:
         """单分区 merge-upsert: polars 读/合并/排序在 _write_lock 外, 锁内只做
@@ -2643,11 +2753,32 @@ class KlineRepository:
         重试耗尽退回锁内直读直写 (正确性优先, 牺牲隔离性)。
         """
         def _merge(existing: pl.DataFrame) -> pl.DataFrame:
+            if schema is not None and not existing.is_empty():
+                # 存量分区可能由旧写入方落成整型量价, 先归一到存储契约再做列对齐,
+                # 否则对齐逻辑会把 incoming 降型到 Int64, 把漂移继续写回去。
+                existing = align_storage_dtypes(existing, schema)
             if existing.is_empty():
-                return incoming.sort(["symbol", "date"])
-            return pl.concat([existing, incoming], how="diagonal_relaxed").unique(
-                subset=["symbol", "date"], keep="last"
-            ).sort(["symbol", "date"])
+                merged = incoming.sort(["symbol", "date"])
+            else:
+                # incoming 先对齐存量文件的列类型再 concat: diagonal_relaxed 遇到
+                # Int32 + UInt32 之类的不一致会提升成 Int64, 于是「某写入方 dtype 偏了」
+                # 会静默把整分区漂成第三种宽度, 之后按 schema 扫描会整次失败
+                # (港美股连板数 Int32 就是这么让港股日K读不出来的)。
+                align = {
+                    col: dtype
+                    for col, dtype in existing.schema.items()
+                    if col in incoming.columns and incoming[col].dtype != dtype
+                }
+                aligned = (
+                    incoming.with_columns([
+                        pl.col(col).cast(dtype, strict=False) for col, dtype in align.items()
+                    ])
+                    if align else incoming
+                )
+                merged = pl.concat([existing, aligned], how="diagonal_relaxed").unique(
+                    subset=["symbol", "date"], keep="last"
+                ).sort(["symbol", "date"])
+            return align_storage_dtypes(merged, schema) if schema is not None else merged
 
         for _ in range(retries):
             existing = pl.read_parquet(out) if out.exists() else pl.DataFrame()
@@ -2774,14 +2905,42 @@ class KlineRepository:
             self._index_enriched_cache = merged_cache
             self._index_enriched_cache_date = dt
 
+    def merge_asset_snapshot_partitions(self, daily: pl.DataFrame, enriched: pl.DataFrame | None = None) -> None:
+        """跨市场(港美股)实时快照落盘: 只写 kline_daily, 不碰 enriched/内存缓存。
+
+        两个关键约束(曾因违反导致 A 股自选行全 null):
+        1. 绝不写 _enriched_cache —— 那是 A 股自选内存快照, merge_live_enriched_asset
+           会把它换成传入的少量实时行。
+        2. 绝不写 kline_daily_enriched 分区 —— 那会 bump matrix generation, 让 A 股
+           enriched 后台预热在 compute 窗口中途判"数据换代"而反复丢弃, 缓存长期留冷。
+           港美股实时价只需落到 kline_daily, 自选读取时从日K叠加 quote_ts/close。
+        """
+        if daily.is_empty() or "date" not in daily.columns:
+            return
+        dt = daily["date"][0]
+        ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+        daily_out = self.store.data_dir / "kline_daily" / f"date={ds}" / "part.parquet"
+        daily_out.parent.mkdir(parents=True, exist_ok=True)
+        # schema 必传: 存量分区可能由整型量价的写入方落成, 不归一会在合并时
+        # 把 incoming 降型或漂出第三种宽度, 之后按 schema 扫描整表失败。
+        self._optimistic_upsert_partition(
+            daily_out, daily, None, schema=DAILY_STORAGE_SCHEMA,
+        )
+
     def flush_live_daily(self, df: pl.DataFrame) -> None:
-        """覆写当天 kline_daily 分区 (实时行情落盘, 非merge)。"""
+        """按 symbol 合并当天 kline_daily 分区 (实时行情落盘)。"""
         if df.is_empty() or "date" not in df.columns:
             return
         self.flush_live_daily_asset("stock", df)
 
     def flush_live_daily_asset(self, asset_type: str, df: pl.DataFrame) -> None:
-        """覆写当天指定资产日K分区 (实时行情落盘, 非merge)。"""
+        """按 symbol 合并当天指定资产日K分区 (实时行情落盘)。
+
+        曾是整分区覆写: kline_daily 由 A 股与港美股共用, A 股实时 flush 会把
+        同一分区里的港美股快照行一起抹掉。改为按 symbol 合并 —— 同名 symbol 以
+        本次实时行为准, 其他市场/其他标的的行原样保留。落盘前按存储契约归一
+        量价类型, 避免当天分区与历史分区 dtype 不一致。
+        """
         if df.is_empty() or "date" not in df.columns:
             return
         table = {
@@ -2796,10 +2955,10 @@ class KlineRepository:
         ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
         out = base / f"date={ds}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
-        # 覆写语义: 排序在锁外, 锁内只做原子替换。
-        df_sorted = df.sort(["symbol", "date"])
-        with self._write_lock:
-            self._atomic_write_parquet(df_sorted, out)
+        df_sorted = align_storage_dtypes(df, DAILY_STORAGE_SCHEMA).sort(["symbol", "date"])
+        self._optimistic_upsert_partition(
+            out, df_sorted, None, schema=DAILY_STORAGE_SCHEMA,
+        )
 
     def flush_live_enriched(self, df: pl.DataFrame) -> None:
         """覆写当天 kline_daily_enriched 分区 (实时 enriched 落盘, 非merge)。

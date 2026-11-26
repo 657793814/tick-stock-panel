@@ -726,3 +726,207 @@ def earliest_enriched_date(repo) -> date | None:
     """返回 enriched 最早日期(供全量重算定起点)。无数据返回 None。"""
     dates = enriched_date_set(repo)
     return min(dates) if dates else None
+
+
+# ───────────────────────── 港美股 regime（多市场扩展，方案 §5.5）────────────────────────
+MARKET_WEIGHTS = {
+    "profit": 0.35,
+    "momentum": 0.25,     # 替代 A 股"投机"(无涨停概念)
+    "resilience": 0.20,
+    "trend": 0.20,
+}
+
+
+def _compute_subscores_market(metrics: dict) -> dict:
+    """港美股 4 维评分：赚钱/动量/抗跌/趋势。
+
+    用 60日新高占比 + 新高-新低净差替代 A 股的涨停/封板率/连板高度；
+    复用本地 _score（含非有限值保护），不产生 A 股涨停语义。
+    """
+    profit = (
+        _score(metrics.get("up_pct", 50), 21, 75) * 0.45
+        + _score(metrics.get("avg_pct", 0) * 100, -1.2, 1.3) * 0.25
+        + _score(metrics.get("median_pct", 0) * 100, -1.2, 1.3) * 0.20
+        + _score(metrics.get("strong_diff_pct", 0), -13, 14) * 0.10
+    )
+    momentum = (
+        _score(metrics.get("new_high_pct", 0) * 100, 0.5, 8) * 0.50
+        + _score(metrics.get("new_high_net", 0), -30, 60) * 0.50
+    )
+    resilience = 100 - _score(metrics.get("strong_down_pct", 0), 2, 18)
+    trend = (
+        _score(metrics.get("avg_pct", 0) * 100, -2.5, 2.5) * 0.50
+        + _score((metrics.get("above_ma20_pct", 0.5) or 0.5) * 100, 22, 76) * 0.50
+    )
+    score = (
+        profit * MARKET_WEIGHTS["profit"]
+        + momentum * MARKET_WEIGHTS["momentum"]
+        + resilience * MARKET_WEIGHTS["resilience"]
+        + trend * MARKET_WEIGHTS["trend"]
+    )
+    return {
+        "profit": profit, "momentum": momentum, "resilience": resilience,
+        "trend": trend, "score": max(0, min(100, score)),
+    }
+
+
+def build_regime_market(repo, market: str, start: date, end: date,
+                        progress=None) -> pl.DataFrame:
+    """按日计算港美股市场环境时序（一次性，不持久化）。
+
+    读共享 enriched 后按 market 过滤 → compute_all(market=...) → 按日聚合 →
+    4 维评分 + classify_state。输出列与 A 股 RegimeRow 同构，`market` 标识来源。
+    """
+    from datetime import timedelta
+    from app.indicators.pipeline import compute_all
+    from app.markets import get_market
+    from app.parquet import scan_enriched_parquet
+
+    get_market(market)  # 非法市场 fail-closed
+    warmup_start = start - timedelta(days=150)
+    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
+    if not enriched_dir.exists() or not any(enriched_dir.rglob("*.parquet")):
+        return pl.DataFrame()
+    try:
+        df = (
+            scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
+            .filter((pl.col("date") >= warmup_start) & (pl.col("date") <= end))
+            .sort(["symbol", "date"])
+            .collect(streaming=True)
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("regime_market(%s) load failed: %s", market, e)
+        return pl.DataFrame()
+    if df.is_empty():
+        return pl.DataFrame()
+
+    from app.markets import filter_symbols
+    df = filter_symbols(df, market)
+    if df.is_empty():
+        return pl.DataFrame()
+
+    df = compute_all(df, market=market)
+
+    rows: list[dict] = []
+    for day, day_df in df.group_by("date"):
+        d = day[0] if isinstance(day, tuple) else day
+        if d < start or day_df.is_empty():
+            continue
+        total = day_df.height
+        chg = day_df["change_pct"].fill_null(0.0)
+        up = int((chg > 0).sum())
+        down = int((chg < 0).sum())
+        up_pct = up / total * 100 if total else 0
+        down_pct = down / total * 100 if total else 0
+        pct_vals = day_df["change_pct"].drop_nulls().to_list()
+        avg_pct = sum(pct_vals) / len(pct_vals) if pct_vals else 0.0
+        sorted_pct = sorted(pct_vals)
+        median_pct = sorted_pct[len(sorted_pct) // 2] if sorted_pct else 0.0
+        strong_up = sum(1 for v in pct_vals if v >= 0.03)
+        strong_down = sum(1 for v in pct_vals if v <= -0.03)
+        strong_up_pct = strong_up / total * 100 if total else 0
+        strong_down_pct = strong_down / total * 100 if total else 0
+        strong_diff_pct = (strong_up - strong_down) / total * 100 if total else 0
+
+        new_high = 0
+        new_low = 0
+        if "high_60d" in day_df.columns and "close" in day_df.columns:
+            new_high = int((day_df["close"] >= day_df["high_60d"].fill_null(0) * 0.995).sum())
+        if "low_60d" in day_df.columns and "close" in day_df.columns:
+            new_low = int((day_df["close"] <= day_df["low_60d"].fill_null(0) * 1.005).sum())
+        new_high_pct = new_high / total * 100 if total else 0
+        new_high_net = new_high - new_low
+
+        above_ma20 = 0
+        if "ma20" in day_df.columns and "close" in day_df.columns:
+            above_ma20 = int((day_df["close"] > day_df["ma20"].fill_null(0)).sum())
+        above_ma20_pct = above_ma20 / total * 100 if total else 0
+
+        metrics = {
+            "up_pct": up_pct, "down_pct": down_pct, "avg_pct": avg_pct,
+            "median_pct": median_pct, "strong_up_pct": strong_up_pct,
+            "strong_down_pct": strong_down_pct, "strong_diff_pct": strong_diff_pct,
+            "new_high": new_high, "new_low": new_low, "new_high_pct": new_high_pct,
+            "new_high_net": new_high_net, "above_ma20_pct": above_ma20_pct / 100.0,
+        }
+        sub = _compute_subscores_market(metrics)
+        score = max(0, min(100, round(sub["score"])))
+        state = ("strong" if score >= STATE_STRONG else "lean_strong" if score >= STATE_LEAN_STRONG
+                 else "range" if score >= STATE_RANGE else "lean_weak" if score >= STATE_LEAN_WEAK
+                 else "weak")
+
+        max_momentum_tier = 1
+        if "momentum_20d" in day_df.columns:
+            mom_max = day_df["momentum_20d"].max()
+            if mom_max is not None:
+                mom_max = float(mom_max)
+                max_momentum_tier = (5 if mom_max >= 0.25 else 4 if mom_max >= 0.15
+                                     else 3 if mom_max >= 0.08 else 2 if mom_max >= 0.03 else 1)
+        rows.append({
+            "date": d, "state": state, "score": score,
+            "limit_up": new_high, "limit_down": new_low,
+            "broken_limit": 0, "max_consecutive": max_momentum_tier,
+            "seal_rate": 0, "up_count": up, "down_count": down,
+            "up_ratio": round(up / down, 4) if down > 0 else (float(up) if up > 0 else 1.0),
+            "index_pct": round(avg_pct, 4),
+            "above_ma20_pct": round(above_ma20_pct / 100, 4),
+            "total_amount": 0, "avg_turnover": 0,
+            "avg_pct": round(avg_pct, 4), "median_pct": round(median_pct, 4),
+            "strong_up_pct": round(strong_up_pct, 4), "strong_down_pct": round(strong_down_pct, 4),
+            "profit_score": round(sub["profit"]),
+            "speculation_score": round(sub["momentum"]),
+            "resilience_score": round(sub["resilience"]),
+            "trend_score": round(sub["trend"]),
+            "market": market,
+        })
+        if progress:
+            progress(d, rows[-1])
+    if not rows:
+        return pl.DataFrame()
+    return pl.DataFrame(rows).sort("date")
+
+
+def regime_market_path(data_dir: Path, market: str) -> Path:
+    return data_dir / f"regime_{market}" / "part.parquet"
+
+
+def save_regime_market(data_dir: Path, market: str, new_rows: pl.DataFrame) -> None:
+    """按 date upsert 港美股 regime 时序。"""
+    if new_rows.is_empty() or "date" not in new_rows.columns:
+        return
+    p = regime_market_path(data_dir, market)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    new_dates = set(new_rows["date"].to_list())
+    old = load_regime_market_history(data_dir, market)
+    if old.is_empty():
+        combined = new_rows
+    else:
+        kept = old.filter(~pl.col("date").is_in(list(new_dates)))
+        target_cols = new_rows.columns
+        keep_exprs = [pl.col(c) if c in kept.columns else pl.lit(None).alias(c) for c in target_cols]
+        kept = kept.select(keep_exprs)
+        combined = pl.concat([kept, new_rows.select(target_cols)], how="vertical_relaxed")
+    combined = combined.sort("date").unique(subset=["date"], keep="last")
+    atomic_write_parquet(combined, p)
+
+
+def load_regime_market_history(data_dir: Path, market: str) -> pl.DataFrame:
+    p = regime_market_path(data_dir, market)
+    if not p.exists():
+        return pl.DataFrame()
+    try:
+        return pl.read_parquet(p)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("load_regime_market_history(%s) failed: %s", market, e)
+        return pl.DataFrame()
+
+
+def get_regime_market_coverage(data_dir: Path, market: str) -> dict:
+    df = load_regime_market_history(data_dir, market)
+    if df.is_empty():
+        return {"rows": 0, "earliest_date": None, "latest_date": None}
+    return {
+        "rows": df.height,
+        "earliest_date": str(df["date"].min()),
+        "latest_date": str(df["date"].max()),
+    }

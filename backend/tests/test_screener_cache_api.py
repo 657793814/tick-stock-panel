@@ -30,7 +30,7 @@ def test_cached_summary_cannot_complete_task_with_snapshot_read_before_publicati
         return {"id": task_id, "complete": state["complete"],
                 "pending": [] if state["complete"] else ["strategy_a"]}
 
-    def read_cache(_request):
+    def read_cache(_request, _market="cn"):
         cached = {"as_of": "2026-07-20", "results": {
             "strategy_a": {"as_of": "2026-07-20", "total": state["total"]},
         }}

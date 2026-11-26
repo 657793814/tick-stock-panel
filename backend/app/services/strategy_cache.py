@@ -9,7 +9,8 @@
     "updated_at": 1705324800000  # Unix ms
   }
 
-文件路径: data/user_data/strategy_cache.json
+文件路径: data/user_data/strategy_cache.json（A 股兼容），港美股为
+data/user_data/strategy_cache_{market}.json。
 """
 from __future__ import annotations
 
@@ -22,6 +23,8 @@ from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+
+from app.markets import ALL_MARKETS, get_market
 
 
 def _json_default(obj: Any) -> Any:
@@ -50,8 +53,11 @@ _file_lock = threading.Lock()
 _memory_cache: dict[str, tuple[int, int, dict]] = {}
 
 
-def _cache_path(data_dir: Path) -> Path:
-    return data_dir / "user_data" / _CACHE_FILENAME
+def _cache_path(data_dir: Path, market: str = "cn") -> Path:
+    """按市场隔离缓存文件；cn 沿用旧文件名，保证旧前端/旧数据兼容。"""
+    get_market(market)
+    name = _CACHE_FILENAME if market == "cn" else f"strategy_cache_{market}.json"
+    return data_dir / "user_data" / name
 
 
 def _enriched_parquet_path(data_dir: Path, as_of: str) -> Path:
@@ -68,7 +74,7 @@ def _get_enriched_mtime(data_dir: Path, as_of: str) -> float | None:
         return None
 
 
-def read_cache(data_dir: Path) -> dict | None:
+def read_cache(data_dir: Path, market: str = "cn") -> dict | None:
     """读取策略缓存文件。返回 None 表示无缓存或读取失败。
 
     说明: 原先有 enriched mtime 过期校验 (数据文件变化 → 判过期返回 None),
@@ -78,11 +84,15 @@ def read_cache(data_dir: Path) -> dict | None:
     端点叠加监控引擎的内存实时结果 (latest_strategy_results) 来保证。
     """
     with _file_lock:
-        return _read_cache_unlocked(data_dir)
+        return _read_cache_unlocked(data_dir, market)
 
 
-def clear_cache(data_dir: Path) -> None:
-    """删除策略结果缓存；策略代码 reload 后避免继续展示旧公式结果。"""
+def clear_cache(data_dir: Path, market: str | None = None) -> None:
+    """删除策略结果缓存；策略代码 reload 后避免继续展示旧公式结果。
+
+    market=None（默认）清空全部市场缓存：策略定义变更对所有市场都失效。
+    显式给 market 时只清对应缓存，供按市场运维使用。
+    """
     import traceback
 
     # 运维可见性: 策略页依赖本缓存秒加载, 被清空即整页回退到全量重算。
@@ -92,20 +102,22 @@ def clear_cache(data_dir: Path) -> None:
         f"{f.filename.rsplit('/', 1)[-1]}:{f.lineno}:{f.name}" for f in frames[-5:]
     )
     logger.warning("策略缓存被清除, 调用链: %s", chain)
-    path = _cache_path(data_dir)
+    markets = [market] if market is not None else ALL_MARKETS
     with _file_lock:
-        _memory_cache.pop(str(path), None)
-        path.unlink(missing_ok=True)
-        path.with_name(path.name + ".tmp").unlink(missing_ok=True)
+        for m in markets:
+            path = _cache_path(data_dir, m)
+            _memory_cache.pop(str(path), None)
+            path.unlink(missing_ok=True)
+            path.with_name(path.name + ".tmp").unlink(missing_ok=True)
 
 
-def _read_cache_unlocked(data_dir: Path) -> dict | None:
+def _read_cache_unlocked(data_dir: Path, market: str = "cn") -> dict | None:
     """实际读取逻辑 (不持锁)。供 read_cache 与 write_cache 复用, 避免重入死锁。
 
     先查内存镜像: (st_mtime_ns, st_size) 指纹与磁盘一致 → 直接返回镜像,
     免去 13MB JSON 重复解析 (前端 2s 轮询场景的主要开销)。
     """
-    path = _cache_path(data_dir)
+    path = _cache_path(data_dir, market)
     key = str(path)
     try:
         st = path.stat()
@@ -145,6 +157,7 @@ def write_cache(
     as_of: str,
     results: dict[str, Any],
     *,
+    market: str = "cn",
     validate: Callable[[], None] | None = None,
     strict: bool = False,
 ) -> None:
@@ -153,14 +166,14 @@ def write_cache(
     - 日期变更时重置 today_ever_matched 和 today_ever_rows
     - 同一天内合并 (并集) 之前曾命中的 symbol，并用最新行数据更新
     """
-    path = _cache_path(data_dir)
+    path = _cache_path(data_dir, market)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # 整个 read-modify-write 持锁: 避免并发 write 丢更新, 也避免与 read_cache 撕裂
     with _file_lock:
         if validate is not None:
             validate()
-        _write_cache_locked(path, data_dir, as_of, results, strict=strict)
+        _write_cache_locked(path, data_dir, as_of, results, market=market, strict=strict)
 
 
 def _write_cache_locked(
@@ -169,11 +182,12 @@ def _write_cache_locked(
     as_of: str,
     results: dict[str, Any],
     *,
+    market: str = "cn",
     strict: bool = False,
 ) -> None:
     """持 _file_lock 后的实际写入逻辑 (read-merge-write + 原子替换)。"""
     # 读取旧缓存 (已持锁, 走不重入的 _read_cache_unlocked)
-    old = _read_cache_unlocked(data_dir)
+    old = _read_cache_unlocked(data_dir, market)
     old_as_of = old.get("as_of") if old else None
     old_ever_rows: dict[str, dict[str, dict]] = old.get("today_ever_rows", {}) if old else {}
 

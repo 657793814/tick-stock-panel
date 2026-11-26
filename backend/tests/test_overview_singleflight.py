@@ -1,5 +1,6 @@
 import threading
 import time
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
@@ -108,3 +109,27 @@ def test_slow_build_does_not_extend_existing_freshness_window(monkeypatch):
     assert overview.market_overview(None) == {"build": 1}
     now[0] = 105.0
     assert overview.market_overview(None) == {"build": 2}
+
+
+def test_quote_invalidation_keeps_market_cache(monkeypatch):
+    """A 股行情推送不应清掉港美股慢路径缓存。"""
+    calls = []
+
+    def build_hk(_repo, market, _as_of):
+        calls.append(1)
+        return {"market": market, "v": len(calls)}
+
+    monkeypatch.setattr(
+        "app.services.market_overview_builder.build_market_overview_market",
+        build_hk,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=object())))
+
+    assert overview.market_overview(request, market="hk") == {"market": "hk", "v": 1}
+    overview.invalidate_overview_cache(markets=["cn"])
+    assert overview.market_overview(request, market="hk") == {"market": "hk", "v": 1}
+    assert calls == [1]
+
+    overview.invalidate_overview_cache(markets=["hk"])
+    assert overview.market_overview(request, market="hk") == {"market": "hk", "v": 2}
+    assert len(calls) == 2

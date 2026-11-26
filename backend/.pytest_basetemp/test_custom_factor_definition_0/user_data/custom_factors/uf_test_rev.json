@@ -1,0 +1,11 @@
+{
+  "id": "uf_test_rev",
+  "kind": "custom",
+  "version": 1,
+  "label": "测试反转",
+  "group": "自定义",
+  "formula": "rank(-ts_sum(close / ts_delay(close, 1) - 1, 5))",
+  "description": "",
+  "direction": "low",
+  "status": "draft"
+}

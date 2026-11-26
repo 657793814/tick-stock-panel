@@ -68,6 +68,71 @@ def _guard_server_backtest_range(start: date, end: date):
         raise HTTPException(status_code=400, detail=BACKTEST_SERVER_GUARD_MESSAGE)
 
 
+def _resolve_market(market: str) -> str:
+    """校验市场参数: 非法值 400, 不冒泡 500。"""
+    from app.markets import get_market
+
+    try:
+        return get_market(market).market
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _market_pool(symbols: list[str] | None, market: str) -> list[str] | None:
+    """按市场过滤标的池; 混入其他市场标的直接 400 (不静默丢弃)。
+
+    共享存储下 enriched/日K 同时含 A 股/港股/美股, 回测若不按 market 过滤,
+    切到港股后仍会用 A 股标的算出"港股回测"结果。
+    """
+    from app.markets import market_of
+
+    if symbols is None:
+        return None
+    kept = [s for s in symbols if market_of(s) == market]
+    dropped = [s for s in symbols if market_of(s) != market]
+    if dropped:
+        preview = "、".join(dropped[:5]) + (" 等" if len(dropped) > 5 else "")
+        raise HTTPException(
+            status_code=400,
+            detail=f"标的与所选市场不符: {preview} — 请切换市场或重新选择标的",
+        )
+    if not kept:
+        raise HTTPException(status_code=400, detail="标的池为空, 请先添加该市场标的")
+    return kept
+
+
+def _guard_market_universe(symbols: list[str] | None, market: str) -> None:
+    """港/美暂不支持全市场回测 (fail-closed)。
+
+    回测面板加载器以 A 股 enriched 全表为底, 不指定标的时无法按市场切分,
+    「全市场」会算出混市场结果 —— 宁可明确拒绝, 也不默默给错误结论。
+    """
+    if market != "cn" and not symbols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{market} 市场回测需指定标的池（暂不支持全市场回测）",
+        )
+
+
+def _guard_market_strategy(request: Request, strategy_id: str, market: str) -> None:
+    """港美股无涨跌停语义: 依赖涨停/连板信号的策略前置拒绝。"""
+    if market == "cn":
+        return
+    engine = getattr(request.app.state, "strategy_engine", None)
+    if engine is None:
+        return
+    try:
+        s = engine.get(strategy_id)
+    except ValueError:
+        return
+    tags = str(getattr(s, "meta", {}).get("tags", []) or [])
+    if "涨停" in tags or "连板" in tags:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{market} 市场不支持涨停/连板口径，该策略无法回测（请切换到 A 股）",
+        )
+
+
 # ================================================================
 # 状态
 # ================================================================
@@ -94,6 +159,7 @@ class BacktestRequest(BaseModel):
     slippage_bps: float = 5
     matching: Literal["close_t", "open_t+1"] = "close_t"
     asset_type: str = "stock"
+    market: str = "cn"
 
 
 @router.post("/run")
@@ -101,6 +167,8 @@ def run(req: BacktestRequest, request: Request):
     """信号回测 — 现有接口，向后兼容。"""
     repo = request.app.state.repo
     svc = BacktestService(repo)
+    market = _resolve_market(req.market)
+    _market_pool(req.symbols, market)  # 校验标的池市场归属 (不符直接 400)
     end = req.end or cn_today()
     start = req.start or (end - timedelta(days=365 * 3))
 
@@ -379,6 +447,7 @@ class StrategyBacktestRequest(BaseModel):
     asset_type: str = "stock"
     minute_fill: bool = False
     regime_filter: dict | None = None
+    market: str = "cn"
 
 
 def _guard_minute_strategy_backtest(
@@ -413,6 +482,10 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
     end = req.end or cn_today()
     start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
+    market = _resolve_market(req.market)
+    symbols = _market_pool(req.symbols, market)
+    _guard_market_universe(symbols, market)
+    _guard_market_strategy(request, req.strategy_id, market)
     _guard_minute_strategy_backtest(request, req.strategy_id, start, req.asset_type)
 
     if req.position_sizing == "policy":
@@ -427,7 +500,7 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
             )
     cfg = StrategyBacktestConfig(
         strategy_id=req.strategy_id,
-        symbols=req.symbols if req.symbols else None,
+        symbols=symbols,
         start=start,
         end=end,
         params=req.params,
@@ -450,6 +523,7 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         asset_type=req.asset_type,
         minute_fill=req.minute_fill,
         regime_filter=req.regime_filter,
+        market=market,
     )
     task = make_worker_task("backtest", settings.data_dir, cfg)
     from app.services.heavy_job_limiter import shared_heavy_job_limiter
@@ -636,8 +710,9 @@ def _make_job_key(
     position_policy: str | None = None,
     position_policy_params: str | None = None,
     force: bool = False,
+    market: str = "cn",
 ) -> str:
-    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}|{position_policy}|{position_policy_params}|force={force}"
+    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}|{position_policy}|{position_policy_params}|market={market}|force={force}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -669,6 +744,7 @@ async def strategy_stream(
     minute_fill: bool = False,
     regime_filter: str | None = None,
     force: bool = False,
+    market: str = "cn",
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
@@ -696,6 +772,12 @@ async def strategy_stream(
         # 空 start = 全部历史: 用本地最早日K日期, 查不到再回退到默认窗口
         earliest = request.app.state.repo.earliest_daily_date()
         start_date = earliest or (end_date - timedelta(days=FACTOR_DEFAULT_DAYS))
+    # 市场维度: 标的池按市场校验 (混入其他市场直接 400), 涨停类策略前置拒绝
+    market = _resolve_market(market)
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
+    _market_pool(symbol_list, market)
+    _guard_market_universe(symbol_list, market)
+    _guard_market_strategy(request, strategy_id, market)
     _guard_minute_strategy_backtest(request, strategy_id, start_date, asset_type)
 
     # 服务端范围保护
@@ -718,6 +800,7 @@ async def strategy_stream(
         position_policy=position_policy,
         position_policy_params=position_policy_params,
         force=force,
+        market=market,
     )
 
     _cleanup_stale_jobs()
@@ -760,7 +843,7 @@ async def strategy_stream(
         if _claim_job_start(job):
             cfg = StrategyBacktestConfig(
                 strategy_id=strategy_id,
-                symbols=[s.strip() for s in symbols.split(",") if s.strip()] if symbols else None,
+                symbols=symbol_list,
                 start=start_date,
                 end=end_date,
                 params=json.loads(params) if params else None,
@@ -785,6 +868,7 @@ async def strategy_stream(
                 asset_type=asset_type,
                 minute_fill=minute_fill,
                 regime_filter=json.loads(regime_filter) if regime_filter else None,
+                market=market,
             )
 
             def _run_backtest():
@@ -900,6 +984,7 @@ async def strategy_cancel(request: Request):
         position_policy=_get("position_policy") or None,
         position_policy_params=_get("position_policy_params") or None,
         force=_get_opt_bool("force"),
+        market=_get("market", "cn"),
     )
     # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
     with _jobs_lock:
@@ -932,7 +1017,7 @@ def _json_safe(obj):
 _OPT_BT_FIELDS = [
     "matching", "fees_pct", "commission_pct", "stamp_tax_pct", "slippage_bps",
     "max_positions", "max_exposure_pct", "initial_capital", "position_sizing",
-    "mode", "holding_days",
+    "mode", "holding_days", "market",
 ]
 
 
@@ -959,6 +1044,7 @@ def _make_opt_job_key(
 def _opt_backtest_kwargs(
     matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
     max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
+    market: str = "cn",
 ) -> dict:
     return {
         "matching": matching,
@@ -972,6 +1058,7 @@ def _opt_backtest_kwargs(
         "position_sizing": position_sizing,
         "mode": mode,
         "holding_days": int(holding_days),
+        "market": market,
     }
 
 
@@ -1077,6 +1164,7 @@ async def optimize_robust_stream(
     position_sizing: str = "equal",
     mode: str = "position",
     holding_days: int = 5,
+    market: str = "cn",
 ):
     """SSE 流式稳健优化: 每组参数在 K 个互不重叠验证段上评估, 按稳健分排名。
 
@@ -1113,9 +1201,15 @@ async def optimize_robust_stream(
         guard_violated = True
 
     direction = direction or None
+    market = _resolve_market(market)
+    opt_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
+    _market_pool(opt_symbols, market)
+    _guard_market_universe(opt_symbols, market)
+    _guard_market_strategy(request, strategy_id, market)
     bt_kwargs = _opt_backtest_kwargs(
         matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
         max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
+        market=market,
     )
     bt_sig = "|".join(f"{k}={bt_kwargs[k]}" for k in _OPT_BT_FIELDS)
     job_key = "robust:" + _make_opt_job_key(
@@ -1274,6 +1368,7 @@ async def walkforward_stream(
     position_sizing: str = "equal",
     mode: str = "position",
     holding_days: int = 5,
+    market: str = "cn",
 ):
     """SSE 流式 walk-forward: 每折训练区间网格优化 -> 测试区间 OOS 回测。
 
@@ -1301,9 +1396,15 @@ async def walkforward_stream(
         earliest = request.app.state.repo.earliest_daily_date()
         start_date = earliest or (end_date - timedelta(days=STRATEGY_DEFAULT_DAYS))
 
+    market = _resolve_market(market)
+    opt_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
+    _market_pool(opt_symbols, market)
+    _guard_market_universe(opt_symbols, market)
+    _guard_market_strategy(request, strategy_id, market)
     bt_kwargs = _opt_backtest_kwargs(
         matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
         max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
+        market=market,
     )
     bt_sig = "|".join(f"{k}={bt_kwargs[k]}" for k in _OPT_BT_FIELDS)
     windows = f"{train_days}/{test_days}/{step_days}"

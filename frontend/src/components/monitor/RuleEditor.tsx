@@ -11,6 +11,7 @@ import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { MONITOR_INTRADAY_SIGNAL_OPTIONS } from '@/lib/signals'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
+import { useMarket, marketLabel } from '@/lib/market'
 
 interface Props {
   /** 编辑现有规则;null=新建 */
@@ -80,13 +81,22 @@ const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
 })
 
 export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
+  const { market } = useMarket()
   const qc = useQueryClient()
   const options = useQuery({ queryKey: QK.monitorRuleOptions, queryFn: api.monitorRuleOptions })
   const { data: prefs } = usePreferences()
   const { data: quoteStatus } = useQuoteStatus()
   const quoteInterval = quoteStatus?.interval_s
   const feishuConfigured = !!(prefs?.feishu_webhook_url)
+  // 飞书应用机器人: 三项齐全才算已配置 (与后端 is_configured 同口径)
+  const feishuAppConfigured = !!(
+    prefs?.feishu_app_id && prefs?.feishu_app_secret_set && prefs?.feishu_app_chat_id
+  )
   const wecomConfigured = !!(prefs?.wecom_webhook_url)
+  const wecomBotConfigured = !!(
+    prefs?.wecom_bot_id && prefs?.wecom_bot_secret && prefs?.wecom_bot_chat_id
+  )
+  const enabledChannels = prefs?.webhook_enabled_channels ?? prefs?.webhook_default_channels ?? []
   const customConfigured = !!(prefs?.custom_webhook_url)
   const emailConfigured = !!(
     prefs?.email_smtp_config?.host
@@ -110,7 +120,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     }
     const initial = {
       ...emptyRule(preset),
-      webhook_channels: preset?.webhook_channels ?? (prefs?.webhook_default_channels ?? []),
+      webhook_channels: preset?.webhook_channels ?? enabledChannels,
     }
     if (initial.type === 'strategy' && !initial.notify_events) {
       initial.notify_events = [...DEFAULT_STRATEGY_NOTIFY_EVENTS]
@@ -1050,6 +1060,12 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       {/* 作用范围 */}
       {draft.type !== 'sector' && <div className="space-y-2">
         <span className="text-[11px] text-muted">作用范围</span>
+        {market !== 'cn' && (
+          <p className="text-[10px] leading-relaxed text-warning/80">
+            监控规则目前仅支持 A 股盘中轮询；当前为{marketLabel(market)}，规则保存后不会在
+            港美股时段触发。
+          </p>
+        )}
         <div className="flex items-start gap-1.5">
           <select value={draft.scope} onChange={e => setDraft(d => ({ ...d, scope: e.target.value as MonitorRule['scope'] }))} className="h-7 w-32 shrink-0 rounded border border-border bg-base px-2 text-[11px] text-foreground">
             {visibleScopes.map(s => <option key={s.key} value={s.key} disabled={hasIntradaySignal && s.key !== 'symbols'}>{s.label}</option>)}
@@ -1531,6 +1547,22 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
+              checked={(draft.webhook_channels ?? []).includes('feishu_app')}
+              onChange={() => toggleChannel('feishu_app')}
+              className="h-3 w-3 accent-accent cursor-pointer"
+            />
+            <span className="text-[11px] text-foreground">飞书</span>
+            <span className="text-[9px] text-muted">智能机器人(应用)</span>
+            {(draft.webhook_channels ?? []).includes('feishu_app') && (
+              <span className={`ml-auto text-[9px] ${feishuAppConfigured ? 'text-emerald-500' : 'text-warning'}`}>
+                {feishuAppConfigured ? '已配置' : '未配置'}
+              </span>
+            )}
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
               checked={(draft.webhook_channels ?? []).includes('custom')}
               onChange={() => toggleChannel('custom')}
               className="h-3 w-3 accent-accent cursor-pointer"
@@ -1577,6 +1609,22 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
             )}
           </label>
 
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={(draft.webhook_channels ?? []).includes('wecom_bot')}
+              onChange={() => toggleChannel('wecom_bot')}
+              className="h-3 w-3 accent-accent cursor-pointer"
+            />
+            <span className="text-[11px] text-foreground">企业微信</span>
+            <span className="text-[9px] text-muted">智能机器人</span>
+            {(draft.webhook_channels ?? []).includes('wecom_bot') && (
+              <span className={`ml-auto text-[9px] ${wecomBotConfigured ? 'text-emerald-500' : 'text-warning'}`}>
+                {wecomBotConfigured ? '已配置' : '未配置'}
+              </span>
+            )}
+          </label>
+
         </div>
 
         {/* 勾选了某渠道但该渠道地址未配置 → 提示前往设置 */}
@@ -1584,14 +1632,31 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           const selected = draft.webhook_channels ?? []
           const unconfigured: string[] = []
           if (selected.includes('feishu') && !feishuConfigured) unconfigured.push('飞书')
+          if (selected.includes('feishu_app') && !feishuAppConfigured) unconfigured.push('飞书智能机器人')
           if (selected.includes('wecom') && !wecomConfigured) unconfigured.push('企业微信')
+          if (selected.includes('wecom_bot') && !wecomBotConfigured) unconfigured.push('企业微信智能机器人')
           if (selected.includes('custom') && !customConfigured) unconfigured.push('第三方系统')
           if (selected.includes('email') && !emailConfigured) unconfigured.push('邮件')
           if (unconfigured.length === 0) return null
           return (
             <p className="text-[10px] leading-relaxed text-warning/80">
               {unconfigured.join('、')}尚未配置,
-              <Link to="/settings?tab=monitoring&highlight=webhooks" className="text-accent hover:text-accent/80">前往设置页配置 →</Link>
+              <Link to="/settings?tab=IM-management" className="text-accent hover:text-accent/80">前往 IM 管理配置 →</Link>
+            </p>
+          )
+        })()}
+        {/* 设置页全局关闭的渠道, 即使规则里残留也不会投递 */}
+        {(() => {
+          const names: Record<string, string> = {
+            feishu: '飞书', feishu_app: '飞书智能机器人', wecom: '企业微信',
+            wecom_bot: '企业微信智能机器人', custom: '第三方系统', email: '邮件',
+          }
+          const disabled = (draft.webhook_channels ?? []).filter(c => !enabledChannels.includes(c))
+          if (disabled.length === 0) return null
+          return (
+            <p className="text-[10px] leading-relaxed text-warning/80">
+              {disabled.map(c => names[c] || c).join('、')}在设置中未启用, 命中本规则时不会推送;
+              <Link to="/settings?tab=IM-management" className="text-accent hover:text-accent/80">前往 IM 管理启用 →</Link>
             </p>
           )
         })()}
@@ -1599,7 +1664,9 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           const selected = draft.webhook_channels ?? []
           const ready: string[] = []
           if (selected.includes('feishu') && feishuConfigured) ready.push('飞书')
+          if (selected.includes('feishu_app') && feishuAppConfigured) ready.push('飞书智能机器人')
           if (selected.includes('wecom') && wecomConfigured) ready.push('企业微信')
+          if (selected.includes('wecom_bot') && wecomBotConfigured) ready.push('企业微信智能机器人')
           if (selected.includes('custom') && customConfigured) ready.push('第三方系统')
           if (selected.includes('email') && emailConfigured) ready.push('邮件')
           if (ready.length === 0) return null

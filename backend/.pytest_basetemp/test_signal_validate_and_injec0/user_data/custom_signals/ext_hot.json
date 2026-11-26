@@ -1,0 +1,15 @@
+{
+  "id": "ext_hot",
+  "name": "题材热度",
+  "kind": "entry",
+  "enabled": true,
+  "conditions": [
+    {
+      "left": "ext_tags_hot",
+      "op": ">",
+      "right": "0.5",
+      "leftDays": 0,
+      "rightDays": 0
+    }
+  ]
+}

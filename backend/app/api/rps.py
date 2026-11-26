@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.api.market_guard import require_cn_market
 from app.services import rps_rotation
 from app.services.concept_rotation_analyzer import analyze_rotation_stream
 from app.services.ndjson_heartbeat import with_heartbeat
@@ -22,6 +23,7 @@ def get_rotation(
     days: int = Query(12, ge=7, le=30, description="最近 N 个交易日(7-30)"),
     kind: str = Query("concept", pattern="concept|industry", description="维度: concept 概念 / industry 行业"),
     level: int | None = Query(None, ge=1, le=3, description="行业层级(仅 kind=industry): 1/2/3 级"),
+    market: str = Query("cn", description="逻辑市场: 仅支持 cn（概念/行业分类是 A 股专属数据）"),
 ) -> dict:
     """维度涨幅轮动矩阵(概念或行业)。
 
@@ -30,6 +32,7 @@ def get_rotation(
         columns: {日期: [[成员名, 涨幅小数], ...]} 每列各自降序
         concept_count: 去重维度成员总数
     """
+    require_cn_market(market, feature="涨幅轮动矩阵")
     return rps_rotation.build_rps_rotation(request.app.state.repo, days, kind, level)
 
 
@@ -39,6 +42,7 @@ class AnalyzeRequest(BaseModel):
     focus: str = ""  # 用户追加的关注点
     kind: str = "concept"  # "concept" 概念 / "industry" 行业
     level: int | None = None  # 行业层级(1/2/3), 仅 kind=industry 有效
+    market: str = "cn"  # 仅支持 cn; 非 A 股明确拒绝
 
 
 @router.post("/rotation-analyze")
@@ -55,6 +59,7 @@ async def analyze_rotation(request: Request, req: AnalyzeRequest):
       {"type":"done"}
     """
     repo = request.app.state.repo
+    require_cn_market(req.market, feature="AI 维度轮动分析")
     quote_service = getattr(request.app.state, "quote_service", None)
     depth_service = getattr(request.app.state, "depth_service", None)
     days = max(7, min(30, req.days))

@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _TIMINGS_FILENAME = "strategy_run_timings.json"
 _timings_lock = threading.Lock()
+_MARKETS = ("cn", "hk", "us")
 
 
 def _timings_path(data_dir: Path) -> Path:
@@ -77,6 +78,33 @@ def order_strategy_ids(all_ids: list[str], timings: dict[str, float]) -> list[st
     known_ids = {sid for _, _, sid in known}
     unknown = [sid for sid in all_ids if sid not in known_ids]
     return [sid for _, _, sid in known] + unknown
+
+
+def parse_key(key: tuple) -> dict:
+    """解析 run_all 任务 key, 屏蔽不同版本 key 形状的差异。
+
+    现行形状 (带市场维度):
+        (market, identity, asset_type, timeframe, as_of, ids)
+    历史形状 (多市场改造前的调用方 / 老测试):
+        (asset_type, timeframe, as_of, ids[, identity])
+    首个元素是市场代码 (cn/hk/us) 即视为现行形状 —— 资产类型只有
+    stock/etf/index, 不会与之混淆。
+    """
+    if key and isinstance(key[0], str) and key[0] in _MARKETS:
+        return {
+            "market": key[0],
+            "identity": key[1] if len(key) > 1 else None,
+            "asset_type": key[2] if len(key) > 2 else None,
+            "timeframe": key[3] if len(key) > 3 else None,
+            "as_of": key[4] if len(key) > 4 else None,
+        }
+    return {
+        "market": "cn",
+        "identity": key[4] if len(key) > 4 else None,
+        "asset_type": key[0] if len(key) > 0 else None,
+        "timeframe": key[1] if len(key) > 1 else None,
+        "as_of": key[2] if len(key) > 2 else None,
+    }
 
 
 class StrategyRunHandle:
@@ -267,7 +295,10 @@ class StrategyRunManager:
                 while len(self._done_recent) > self._max_recent:
                     self._done_recent.pop(next(iter(self._done_recent)))
 
-    def minute_summaries(self, *, identity: tuple | None = None, asset_type: str | None = None) -> list[dict]:
+    def minute_summaries(
+        self, *, identity: tuple | None = None, asset_type: str | None = None,
+        market: str | None = None,
+    ) -> list[dict]:
         """所有分钟 (timeframe='1m') handle 的结果摘要, 供 cached-summary 合并。
 
         分钟策略结果不落 strategy_cache (日线语义), 渐进式转后台后前端靠
@@ -278,15 +309,18 @@ class StrategyRunManager:
         with self._lock:
             handles = list(self._handles.values()) + list(self._done_recent.values())
         for h in handles:
-            if len(h.key) < 2 or h.key[1] != "1m":
+            parts = parse_key(h.key)
+            if parts["timeframe"] != "1m":
                 continue
-            if asset_type is not None and h.key[0] != asset_type:
+            if asset_type is not None and parts["asset_type"] != asset_type:
                 continue
-            if identity is not None and (len(h.key) < 5 or h.key[4] != identity):
+            if market is not None and parts["market"] != market:
+                continue
+            if identity is not None and parts["identity"] != identity:
                 continue
             snap = h.snapshot()
             out.append({
-                "as_of": h.key[2] if len(h.key) > 2 else None,
+                "as_of": parts["as_of"],
                 "results": {
                     sid: {
                         "total": int(payload.get("total") or 0),

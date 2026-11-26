@@ -1,4 +1,5 @@
 import type { DailyMarkerStyle } from './chart-types'
+import type { Market } from './market'
 
 /**
  * 集中管理所有 localStorage 持久化。
@@ -125,6 +126,9 @@ export const storage = {
 
   /** 界面整体缩放 (0.8–1.5, 设置→系统→界面缩放; 桌面客户端无浏览器缩放快捷键) */
   pageZoom:             kv<number>('tf-page-zoom'),
+
+  /** 全局市场切换 (多市场扩展): cn=A股 / hk=港股 / us=美股 */
+  globalMarket:         kv<Market>('global-market'),
 
   /** 连板梯队板块筛选 */
   limitLadderBoard:     kv<string[]>('limit-ladder-board-filter'),

@@ -53,10 +53,11 @@ def regime_history(
     start: date | None = Query(None),
     end: date | None = Query(None),
     limit: int = Query(120, ge=1, le=1000),
+    market: str = Query("cn", description="cn|hk|us，默认 cn"),
 ):
-    """历史环境时序(含状态/指标)。默认最近 N 天。"""
+    """历史环境时序(含状态/指标)。默认最近 N 天。港美股读独立时序表。"""
     global _cache, _cache_ts
-    cache_key = f"hist|{start}|{end}|{limit}"
+    cache_key = f"hist|{market}|{start}|{end}|{limit}"
     with _cache_lock:
         if (
             _cache is not None
@@ -65,7 +66,10 @@ def regime_history(
         ):
             return _cache["data"]
 
-    df = regime_builder.load_regime_history(_data_dir(request))
+    if market in ("hk", "us"):
+        df = regime_builder.load_regime_market_history(_data_dir(request), market)
+    else:
+        df = regime_builder.load_regime_history(_data_dir(request))
     if df.is_empty():
         result: dict = {"rows": [], "total": 0}
     else:
@@ -96,9 +100,12 @@ def pl_col_date(df, op: str, value: date):
 
 
 @router.get("/latest")
-def regime_latest(request: Request):
+def regime_latest(request: Request, market: str = Query("cn", description="cn|hk|us")):
     """最新一日环境(轻量)。"""
-    df = regime_builder.load_regime_history(_data_dir(request))
+    if market in ("hk", "us"):
+        df = regime_builder.load_regime_market_history(_data_dir(request), market)
+    else:
+        df = regime_builder.load_regime_history(_data_dir(request))
     if df.is_empty():
         return {"row": None}
     latest = df.sort("date", descending=True).head(1)
@@ -110,9 +117,13 @@ def regime_latest(request: Request):
 def regime_states(
     request: Request,
     days: int = Query(60, ge=1, le=1000),
+    market: str = Query("cn", description="cn|hk|us"),
 ):
     """状态分布统计(各状态天数/占比)。"""
-    df = regime_builder.load_regime_history(_data_dir(request))
+    if market in ("hk", "us"):
+        df = regime_builder.load_regime_market_history(_data_dir(request), market)
+    else:
+        df = regime_builder.load_regime_history(_data_dir(request))
     if df.is_empty():
         return {"distribution": [], "days": 0}
     df = df.sort("date", descending=True).head(days)
@@ -131,25 +142,50 @@ def regime_states(
 
 
 @router.get("/coverage")
-def regime_coverage(request: Request):
+def regime_coverage(request: Request, market: str = Query("cn", description="cn|hk|us")):
     """regime 数据覆盖元信息(供数据画像)。"""
+    if market in ("hk", "us"):
+        return regime_builder.get_regime_market_coverage(_data_dir(request), market)
     return regime_builder.get_regime_coverage(_data_dir(request))
 
 
 @router.post("/recompute")
-def regime_recompute(request: Request, start: date | None = None, end: date | None = None):
+def regime_recompute(
+    request: Request, start: date | None = None, end: date | None = None,
+    market: str = Query("cn", description="cn|hk|us，默认 cn"),
+):
     """手动触发重算(全量或指定区间)。管理员操作。
 
     - 不传 start: 强制全量重算(enriched 最早日 ~ 今天), 覆盖所有已有行。
       与 daily_pipeline 的增量补差(compute_regime_incremental)不同 —— 此接口面向
       人工「我要重新算一遍」的预期, 必须真正重算而非增量补缺口。
     - 传 start: 仅重算 [start, end] 区间。
+    - market=hk|us: 重算港美股市场环境（动量替代投机维度）。
     - 重算后统一重标情绪周期阶段(refresh_phase_labels)并回填主线
       (概念+行业, 概念成分为当前快照回看历史, 早年有归属漂移)。
     """
     repo = request.app.state.repo
     data_dir = _data_dir(request)
     end = end or cn_today()
+    if market in ("hk", "us"):
+        from datetime import timedelta as _td
+        from app.services.screener import ScreenerService
+
+        if start is None:
+            latest = ScreenerService(repo, market=market).latest_date()
+            if latest is None:
+                invalidate_regime_cache()
+                return {"ok": True, "computed": 0, "market": market}
+            start = latest - _td(days=500)
+        new_rows = regime_builder.build_regime_market(repo, market, start=start, end=end)
+        if not new_rows.is_empty():
+            regime_builder.save_regime_market(data_dir, market, new_rows)
+        invalidate_regime_cache()
+        return {
+            "ok": True,
+            "computed": new_rows.height if not new_rows.is_empty() else 0,
+            "market": market,
+        }
     if start is None:
         # 全量: 从 enriched 最早日强制重算到今天
         earliest = regime_builder.earliest_enriched_date(repo)

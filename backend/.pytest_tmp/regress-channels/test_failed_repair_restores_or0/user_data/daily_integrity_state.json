@@ -1,0 +1,1 @@
+{"version": 1, "entries": [{"asset_type": "stock", "day": "2026-10-29", "symbol": null, "needs_raw": true, "needs_enriched": true, "kind": "corrupt", "reason": "日K文件损坏或无法读取"}], "revisions": {"stock": "f2ac0a4833704f79ba69769f58c9e60b"}}

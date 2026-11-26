@@ -399,7 +399,7 @@ export function MiningWorkbench() {
     enabled: validDateRange,
     staleTime: 30_000,
   })
-  const regimeLatestQuery = useQuery({ queryKey: QK.regimeLatest, queryFn: api.regimeLatest, staleTime: 60_000 })
+  const regimeLatestQuery = useQuery({ queryKey: QK.regimeLatest(), queryFn: () => api.regimeLatest(), staleTime: 60_000 })
   const configQuery = useQuery({ queryKey: QK.miningConfig, queryFn: api.miningConfig })
 
   useEffect(() => {
@@ -654,7 +654,7 @@ export function MiningWorkbench() {
       return { recomputed, job }
     },
     onSuccess: ({ recomputed, job }) => {
-      for (const key of [QK.regimeLatest, QK.regimeCoverage, QK.regimeHistoryPrefix]) {
+      for (const key of [QK.regimeLatest(), QK.regimeCoverage(), QK.regimeHistoryPrefix]) {
         queryClient.invalidateQueries({ queryKey: key })
       }
       toast(recomputed.computed > 0 ? `环境补算完成 · 新增 ${recomputed.computed} 天，重新开始挖掘` : '环境数据已是最新，重新开始挖掘', 'success')

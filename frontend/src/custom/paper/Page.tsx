@@ -16,19 +16,25 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
-import { Banknote, ChevronDown, ChevronUp, CircleDollarSign, GitCompare, History, ListChecks, PieChart, Plus, RefreshCw, Settings, ShieldAlert, SlidersHorizontal, Snowflake, Trash2, TrendingUp, Wallet, X, Zap } from 'lucide-react'
+import { Activity, Banknote, ChevronDown, ChevronUp, CircleDollarSign, Cpu, GitCompare, History, ListChecks, PieChart, Plus, RefreshCw, Settings, ShieldAlert, SlidersHorizontal, TrendingUp, Wallet, X, Zap } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import { api, type PaperCompareRow, type PaperFill, type PaperHolding, type PaperOrder, type PaperRound } from '@/lib/api'
+import { api, type PaperCompareRow, type PaperFill, type PaperHolding, type PaperLiveItem, type PaperLiveTotals, type PaperOrder, type PaperReplayResponse, type PaperRound } from '@/lib/api'
+import type { ChartMarker } from '@/lib/chart-types'
+import { StockDailyKChart, getDefaultRange } from '@/components/StockDailyKChart'
 import { QK } from '@/lib/queryKeys'
 import { selectableStrategies, strategyOptionLabel } from '@/lib/strategyLibrary'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
+import { useSymbolTicks } from '@/lib/useSymbolTicks'
+import { useMarket, marketLabel, type Market } from '@/lib/market'
 import { cn } from '@/lib/cn'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/components/stock-table/primitives'
 import { PageHeader } from '@/components/PageHeader'
 import { Modal } from '@/components/Modal'
 import { StrategyExecutionPanel } from './StrategyExecutionPanel'
-import { executionApi, executionListKey } from './executionClient'
+import { executionApi, executionKey, executionListKey, type ExecutionBinding } from './executionClient'
+import { AnimatedNumber } from '@/components/motion/AnimatedNumber'
+import { PulseLine } from '@/components/motion/PulseLine'
 
 const ORDER_TYPE_LABEL: Record<string, string> = {
   market: '即时',
@@ -60,8 +66,14 @@ function normalizeBase(values: Array<number | null | undefined>): Array<number |
   return values.map(v => (v != null && v > 0 ? Number(((v / first) * 100).toFixed(2)) : null))
 }
 
-/** 净值曲线 (echarts line, 跟随主题色): 账户归一化 vs 沪深300 归一化 (首日=100) */
-function NavChart({ nav }: { nav: Array<{ date: string; nav: number; benchmark_close?: number }> }) {
+/** 净值曲线基准名称（与 app.markets.benchmark_symbol 对齐） */
+const BENCHMARK_LABEL: Record<Market, string> = { cn: '沪深300', hk: '恒生指数', us: '标普500' }
+
+/** 净值曲线 (echarts line, 跟随主题色): 账户归一化 vs 市场基准归一化 (首日=100) */
+function NavChart({ nav, market = 'cn' }: {
+  nav: Array<{ date: string; nav: number; benchmark_close?: number }>
+  market?: Market
+}) {
   const elRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<echarts.ECharts | null>(null)
 
@@ -74,7 +86,7 @@ function NavChart({ nav }: { nav: Array<{ date: string; nav: number; benchmark_c
     const observer = new MutationObserver(() => {
       const darkNow = document.documentElement.classList.contains('dark')
       const axisColor = darkNow ? '#8E8E96' : '#52525B'
-      const splitColor = darkNow ? '#353539' : '#E4E4E7'
+      const splitColor = darkNow ? 'rgba(139, 92, 246, 0.16)' : '#E4E4E7'
       chartRef.current?.setOption({
         xAxis: { axisLine: { lineStyle: { color: splitColor } }, axisLabel: { color: axisColor } },
         yAxis: { axisLabel: { color: axisColor }, splitLine: { lineStyle: { color: splitColor } } },
@@ -94,7 +106,7 @@ function NavChart({ nav }: { nav: Array<{ date: string; nav: number; benchmark_c
     if (!chart) return
     const dark = document.documentElement.classList.contains('dark')
     const axisColor = dark ? '#8E8E96' : '#52525B'
-    const splitColor = dark ? '#353539' : '#E4E4E7'
+    const splitColor = dark ? 'rgba(139, 92, 246, 0.16)' : '#E4E4E7'
     chart.setOption({
       grid: { left: 56, right: 16, top: 16, bottom: 28 },
       tooltip: {
@@ -119,11 +131,16 @@ function NavChart({ nav }: { nav: Array<{ date: string; nav: number; benchmark_c
           type: 'line',
           data: normalizeBase(nav.map(n => n.nav)),
           showSymbol: false,
-          lineStyle: { color: '#8B5CF6', width: 2 },
-          areaStyle: { color: 'rgba(139, 92, 246, 0.08)' },
+          lineStyle: { color: '#A78BFA', width: 2.4, shadowBlur: 14, shadowColor: 'rgba(139, 92, 246, 0.6)' },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(139, 92, 246, 0.26)' },
+              { offset: 1, color: 'rgba(139, 92, 246, 0.01)' },
+            ]),
+          },
         },
         ...(nav.some(n => n.benchmark_close) ? [{
-          name: '沪深300',
+          name: BENCHMARK_LABEL[market],
           type: 'line' as const,
           data: normalizeBase(nav.map(n => n.benchmark_close)),
           showSymbol: false,
@@ -137,23 +154,98 @@ function NavChart({ nav }: { nav: Array<{ date: string; nav: number; benchmark_c
         itemWidth: 14,
       },
     })
-  }, [nav])
+  }, [nav, market])
 
   return <div ref={elRef} className="h-48 w-full" />
 }
 
-function StatCard({ label, value, sub, valueClass, icon: Icon, iconCls }: {
-  label: string; value: string; sub?: string; valueClass?: string
+function StatCard({ label, value, numeric, numFormat, sub, valueClass, icon: Icon, iconCls }: {
+  label: string; value?: string; numeric?: number; numFormat?: (v: number) => string; sub?: string; valueClass?: string
   icon?: React.ComponentType<{ className?: string }>; iconCls?: string
 }) {
   return (
-    <div className="rounded-card border border-border bg-surface px-4 py-3 transition-colors duration-150 hover:border-accent/25 hover:bg-elevated/30">
-      <div className="flex items-center gap-1.5 text-[11px] text-muted">
+    <div className="tf-stat rounded-card border border-border bg-surface px-4 py-3 transition-colors duration-150 hover:border-accent/25 hover:bg-elevated/30">
+      <div className="flex items-center gap-1.5 text-[10px] tracking-[0.1em] text-muted">
         {Icon && <Icon className={cn('h-3.5 w-3.5', iconCls)} />}
         {label}
       </div>
-      <div className={cn('mt-1 font-mono text-xl font-semibold tabular', valueClass)}>{value}</div>
+      <div className={cn('tf-stat-value mt-1 font-mono text-xl font-semibold tabular', valueClass)}>
+        {numeric != null && numFormat ? (
+          <AnimatedNumber value={numeric} format={numFormat} className="tabular" />
+        ) : value}
+      </div>
       {sub && <div className="mt-0.5 text-[10px] text-muted">{sub}</div>}
+    </div>
+  )
+}
+
+
+/** 全账户盈亏速览墙: 按累计收益排序的一屏对比面板 (任务: 快速查阅谁在盈谁在亏)。
+ *  领涨红/领跌绿 (A 股配色), 卡片点击直接打开该账户终端。 */
+const PNL_MKT_LABEL: Record<string, string> = { cn: 'A股', hk: '港股', us: '美股' }
+
+function PnlBoard({ rows, onOpen }: { rows: PaperCompareRow[]; onOpen: (r: PaperCompareRow) => void }) {
+  const board = useMemo(
+    () => [...rows].sort((a, b) => (b.pnl_pct ?? -9999) - (a.pnl_pct ?? -9999)),
+    [rows],
+  )
+  if (board.length === 0) return null
+  const pcts = board.map(r => Math.abs(r.pnl_pct ?? 0))
+  const span = Math.max(...pcts, 0.01)
+  const gainers = board.filter(r => (r.pnl_pct ?? 0) > 0).length
+  const losers = board.filter(r => (r.pnl_pct ?? 0) < 0).length
+  return (
+    <div className="tf-pnl-board">
+      <div className="flex items-center gap-2">
+        <span className="tf-pnl-tag">P&L BOARD</span>
+        <span className="text-[10px] text-muted">全账户盈亏速览 · 点卡片开终端</span>
+        <span className="ml-auto flex items-center gap-3 font-mono text-[10px] tabular">
+          <span className="text-bull">盈 {gainers}</span>
+          <span className="text-bear">亏 {losers}</span>
+          <span className="text-muted">平 {board.length - gainers - losers}</span>
+        </span>
+      </div>
+      <div className="tf-pnl-grid">
+        {board.map((r, i) => {
+          const pct = r.estimating ? (r.live_pnl_pct ?? r.pnl_pct) : r.pnl_pct
+          const pnl = r.total_pnl ?? 0
+          const up = (pct ?? 0) >= 0
+          const w = pct == null ? 0 : Math.min(100, Math.max(5, (Math.abs(pct) / span) * 100))
+          return (
+            <button
+              key={r.account}
+              type="button"
+              onClick={() => onOpen(r)}
+              className={cn('tf-pnl-cell', up ? 'is-up' : 'is-down', r.status === 'frozen' && 'is-frozen')}
+              title={`${r.name} · ${r.account} · 总资产 ${fmtMoney(r.total ?? 0)}`}
+            >
+              <span className="tf-pnl-rank">{i + 1}</span>
+              <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
+                <span className="flex w-full items-center gap-1">
+                  <span className="max-w-28 truncate text-[11px] font-medium text-secondary">{r.name}</span>
+                  <span className="tf-pnl-mkt">{PNL_MKT_LABEL[r.market ?? 'cn']}</span>
+                  {r.estimating && <span className="tf-pnl-live">LIVE</span>}
+                  {r.status === 'frozen' && <span className="tf-pnl-mkt is-frozen">冻结</span>}
+                </span>
+                <AnimatedNumber
+                  value={pnl}
+                  format={v => `${v >= 0 ? '+' : ''}${fmtMoney(v)}`}
+                  resetKey={r.estimating ? 'live' : (r.last_nav_date ?? undefined)}
+                  className={cn('font-mono text-[13px] font-semibold tabular', priceColorClass(pnl / (r.initial_cash || 1)))}
+                />
+              </span>
+              <span className="flex shrink-0 flex-col items-end gap-1">
+                <span className={cn('font-mono text-[11px] tabular', priceColorClass((pct ?? 0) / 100))}>
+                  {pct == null ? '—' : fmtPct(pct / 100)}
+                </span>
+                <span className="tf-pnl-bar" aria-hidden="true">
+                  <i style={{ width: `${w}%` }} className={up ? 'bg-bull' : 'bg-bear'} />
+                </span>
+              </span>
+            </button>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -174,9 +266,16 @@ function loadNewAccountDefaults(): Required<NewAccountDefaults> {
   return {
     cash: src.cash ?? '1000000',
     commissionWan: src.commissionWan ?? '2.5',   // 万2.5
-    stampQian: src.stampQian ?? '1',             // 千1 (仅卖出)
+    stampQian: src.stampQian ?? '1',             // 千1 (A股卖出单边)
     slippageBps: src.slippageBps ?? '5',         // 5bps
   }
+}
+
+/** 切换市场时同步默认印花税档位（美股无印花税，港股双边千1）。 */
+function defaultStampQian(market: Market, fallback: string): string {
+  if (market === 'us') return '0'
+  if (market === 'hk') return '1'
+  return fallback
 }
 
 /** 初始化向导: 选中账户不存在或正在新建时展示。
@@ -184,9 +283,11 @@ function loadNewAccountDefaults(): Required<NewAccountDefaults> {
  * 费用三参数可设置, 且记住为下次新建的默认值。 */
 function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (createdId: string) => void; onCancel?: () => void }) {
   const defaults = loadNewAccountDefaults()
+  const { market: globalMarket } = useMarket()
+  const [market, setMarket] = useState<Market>(globalMarket)
   const [cash, setCash] = useState(defaults.cash)
   const [commissionWan, setCommissionWan] = useState(defaults.commissionWan)
-  const [stampQian, setStampQian] = useState(defaults.stampQian)
+  const [stampQian, setStampQian] = useState(defaultStampQian(globalMarket, defaults.stampQian))
   const [slippageBps, setSlippageBps] = useState(defaults.slippageBps)
   const [name, setName] = useState('')
   // 事件跟单（兼容，可选）: 创建后立即绑一条自动跟单规则, 策略/监控规则触发信号时按下方参数自动下单
@@ -220,6 +321,7 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
         initial_cash: Number(cash),
         account_id: accId,
         name: name.trim() || autoLabel || undefined,
+        market,
         commission_pct: Number(commissionWan) / 10000,   // 万 X → pct
         stamp_tax_pct: Number(stampQian) / 1000,         // 千 X → pct
         slippage_bps: Number(slippageBps),
@@ -298,6 +400,25 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
         className="mt-1 w-full rounded-btn border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent/50"
         placeholder={autoId.trim() && autoName ? `默认用${autoKind === 'strategy' ? '策略' : '规则'}名: ${autoName}` : (accId === 'default' ? '默认账户' : `账户 ${accId}`)}
       />
+      <label className="mt-3 block text-xs text-secondary">交易市场</label>
+      <select
+        value={market}
+        onChange={e => {
+          const next = e.target.value as Market
+          setMarket(next)
+          setStampQian(defaultStampQian(next, defaults.stampQian))
+        }}
+        className="mt-1 w-full rounded-btn border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent/50"
+      >
+        <option value="cn">A股 · T+1 · 100股/手</option>
+        <option value="hk">港股 · T+0 · 100股/手(估算) · 双边印花税</option>
+        <option value="us">美股 · T+0 · 1股/手</option>
+      </select>
+      {market !== 'cn' && (
+        <p className="mt-1 text-[10px] text-muted">
+          当前按 {marketLabel(market)} 默认口径撮合；{market === 'hk' ? '港股每手实际股数按标的维表，后续接入后再收紧' : '美股按 1 股起算'}。
+        </p>
+      )}
       <label className="mt-3 block text-xs text-secondary">初始虚拟资金 (元)</label>
       <input
         type="number"
@@ -1101,76 +1222,6 @@ function DeleteAccountModal({ acc, name, holdingsCount, onClose, onDeleted }: {
 // ================================================================
 // 多账户横向对比: 归一化净值叠加图。
 // ================================================================
-const COMPARE_COLORS = ['#3B82F6', '#F59E0B', '#10B981', '#EF4444', '#8B5CF6', '#06B6D4', '#EC4899', '#84CC16']
-
-function CompareChart({ rows }: { rows: PaperCompareRow[] }) {
-  const elRef = useRef<HTMLDivElement>(null)
-  const chartRef = useRef<echarts.ECharts | null>(null)
-
-  useEffect(() => {
-    if (!elRef.current) return
-    chartRef.current = echarts.init(elRef.current, undefined, { renderer: 'canvas' })
-    const onResize = () => chartRef.current?.resize()
-    window.addEventListener('resize', onResize)
-    const observer = new MutationObserver(() => {
-      const darkNow = document.documentElement.classList.contains('dark')
-      const axisColor = darkNow ? '#8E8E96' : '#52525B'
-      const splitColor = darkNow ? '#353539' : '#E4E4E7'
-      chartRef.current?.setOption({
-        xAxis: { axisLine: { lineStyle: { color: splitColor } }, axisLabel: { color: axisColor } },
-        yAxis: { axisLabel: { color: axisColor }, splitLine: { lineStyle: { color: splitColor } } },
-      })
-    })
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
-    return () => {
-      window.removeEventListener('resize', onResize)
-      observer.disconnect()
-      chartRef.current?.dispose()
-      chartRef.current = null
-    }
-  }, [])
-
-  useEffect(() => {
-    const chart = chartRef.current
-    if (!chart) return
-    const dark = document.documentElement.classList.contains('dark')
-    const axisColor = dark ? '#8E8E96' : '#52525B'
-    const splitColor = dark ? '#353539' : '#E4E4E7'
-    chart.setOption({
-      grid: { left: 52, right: 16, top: 30, bottom: 26 },
-      tooltip: {
-        trigger: 'axis',
-        valueFormatter: (v: number) => v?.toFixed(4),
-      },
-      xAxis: {
-        type: 'time',
-        axisLine: { lineStyle: { color: splitColor } },
-        axisLabel: { color: axisColor, fontSize: 10 },
-      },
-      yAxis: {
-        type: 'value',
-        scale: true,
-        axisLabel: { color: axisColor, fontSize: 10, formatter: (v: number) => v.toFixed(2) },
-        splitLine: { lineStyle: { color: splitColor } },
-      },
-      legend: { top: 0, right: 0, textStyle: { color: axisColor, fontSize: 10 }, itemWidth: 14 },
-      series: rows.map((r, i) => ({
-        name: r.name,
-        type: 'line' as const,
-        // 仅 1 个定版点时无线段可画, 显示为圆点 (否则曲线"消失")
-        showSymbol: r.nav.length <= 1,
-        symbolSize: 7,
-        // 归一化: 定版净值 / 首日净值 (不同本金也能公平对比)
-        data: r.nav.map(n => [n.date, Number((n.nav / (r.nav[0]?.nav || 1)).toFixed(4))]),
-        lineStyle: { color: COMPARE_COLORS[i % COMPARE_COLORS.length], width: 2 },
-        itemStyle: { color: COMPARE_COLORS[i % COMPARE_COLORS.length] },
-      })),
-    })
-  }, [rows])
-
-  return <div ref={elRef} className="h-56 w-full" />
-}
-
 function AutoRulesPanel({ acc }: { acc: string }) {
   const qc = useQueryClient()
   const rulesQ = useQuery({ queryKey: QK.paperAutoRules(acc), queryFn: () => api.paperAutoRules(acc) })
@@ -1409,49 +1460,18 @@ function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => vo
 // 多账户对比 (V3): 模拟盘默认主视图 — 对比优先, 收益降序。
 // ================================================================
 
-/** 净值迷你走势 (纯 SVG polyline, 最近 ~30 个定版点; 红涨绿跌与全局口径一致) */
-function NavSpark({ nav }: { nav: Array<{ date: string; nav: number }> }) {
-  const pts = nav.map(n => n.nav).filter(v => v > 0).slice(-30)
-  if (pts.length < 2) return <span className="block text-center text-[11px] text-muted">—</span>
-  const w = 84, h = 24, pad = 2
-  const min = Math.min(...pts)
-  const max = Math.max(...pts)
-  const span = max - min || 1
-  const step = (w - pad * 2) / (pts.length - 1)
-  const up = pts[pts.length - 1] >= pts[0]
-  const d = pts
-    .map((v, i) => `${(pad + i * step).toFixed(1)},${(h - pad - ((v - min) / span) * (h - pad * 2)).toFixed(1)}`)
-    .join(' ')
-  return (
-    <svg width={w} height={h} className="mx-auto block" aria-hidden>
-      <polyline points={d} fill="none" stroke={up ? '#F04438' : '#12B76A'} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function RankBadge({ rank, accent }: { rank: number; accent?: boolean }) {
-  return (
-    <span className={cn(
-      'inline-flex h-5 w-5 items-center justify-center rounded-full font-mono text-[11px] font-semibold',
-      accent && rank === 1 ? 'bg-accent/20 text-accent' : accent && rank <= 3 ? 'bg-elevated text-secondary' : 'text-muted',
-    )}>
-      {rank}
-    </span>
-  )
-}
-
-/** 对比榜单可排序列 (表头点击切换) */
 type CmpSortKey = 'name' | 'total' | 'pnl_pct' | 'day_change_pct' | 'win_rate' | 'profit_loss_ratio' | 'rounds' | 'holdings_count' | 'last_nav_date' | 'realized_pnl' | 'max_drawdown'
 
-/** 可空列: 无值行排序时恒垫底 (与方向无关), 见 sorted 比较器 */
+/** 空值判定: 这些列无值行恒垫底, 不随排序方向翻到顶部 */
 const CMP_NULLABLE: Partial<Record<CmpSortKey, (r: PaperCompareRow) => boolean>> = {
-  pnl_pct: r => r.pnl_pct == null,
-  day_change_pct: r => r.day_change_pct == null,
-  profit_loss_ratio: r => r.profit_loss_ratio == null,
-  last_nav_date: r => r.last_nav_date == null,
   max_drawdown: r => r.max_drawdown == null,
+  profit_loss_ratio: r => r.profit_loss_ratio == null,
+  day_change_pct: r => r.day_change_pct == null,
+  realized_pnl: r => r.realized_pnl == null,
+  last_nav_date: r => !r.last_nav_date,
 }
 
+/** 排序取值 */
 function cmpSortVal(k: CmpSortKey, r: PaperCompareRow): string | number {
   switch (k) {
     case 'name': return r.name
@@ -1469,51 +1489,30 @@ function cmpSortVal(k: CmpSortKey, r: PaperCompareRow): string | number {
 }
 
 /** 可排序表头: 点击切换该列升降序, 活动列显方向箭头, 非活动列 hover 显淡箭头 (样式随 Review._DtTh) */
-function SortTh({ label, sortKey, sort, onSort, align = 'left', title }: {
-  label: string
-  sortKey: CmpSortKey
-  sort: { key: CmpSortKey; desc: boolean }
-  onSort: (k: CmpSortKey) => void
-  align?: 'left' | 'right'
-  title?: string
-}) {
-  const active = sort.key === sortKey
-  return (
-    <th className={cn('group/th py-1.5 font-medium', align === 'right' && 'text-right')}>
-      <button
-        type="button"
-        title={title}
-        onClick={() => onSort(sortKey)}
-        className={cn('inline-flex items-center gap-0.5 transition-colors hover:text-foreground', active && 'text-foreground')}
-      >
-        {label}
-        {active ? (
-          sort.desc
-            ? <ChevronDown className="h-2.5 w-2.5 opacity-80" />
-            : <ChevronUp className="h-2.5 w-2.5 opacity-80" />
-        ) : (
-          <ChevronDown className="h-2.5 w-2.5 opacity-0 transition-opacity group-hover/th:opacity-40" />
-        )}
-      </button>
-    </th>
-  )
-}
+const CMP_SORT_OPTIONS: Array<{ key: CmpSortKey; label: string }> = [
+  { key: 'pnl_pct', label: '累计收益' },
+  { key: 'total', label: '总资产' },
+  { key: 'day_change_pct', label: '最新日' },
+  { key: 'realized_pnl', label: '已实现' },
+  { key: 'max_drawdown', label: '回撤' },
+  { key: 'win_rate', label: '胜率' },
+  { key: 'profit_loss_ratio', label: '盈亏比' },
+  { key: 'rounds', label: '回合' },
+  { key: 'holdings_count', label: '持仓' },
+  { key: 'last_nav_date', label: '最近结算' },
+  { key: 'name', label: '账户名' },
+]
 
 function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
   const [createOpen, setCreateOpen] = useState(false)
   const [baseOpen, setBaseOpen] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
+  // 资金全景右侧聚焦账户 (与终端展开解耦: 关掉终端仍保留聚焦)
+  const [focusAcc, setFocusAcc] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<PaperCompareRow | null>(null)
   const qc = useQueryClient()
-  // 表头排序: 默认累计收益降序; 同列再点翻转方向, 换列时数值列默认降序、账户名默认升序
+  // 卡片排序: 默认累计收益降序; 换列时数值列默认降序、账户名默认升序
   const [sort, setSort] = useState<{ key: CmpSortKey; desc: boolean }>({ key: 'pnl_pct', desc: true })
-  const onSortCmp = (k: CmpSortKey) =>
-    setSort(s => (s.key === k ? { key: k, desc: !s.desc } : { key: k, desc: k !== 'name' }))
-  // 行内冻结/解冻 (与展开面板同一入口, 免展开直接切)
-  const freezeM = useMutation({
-    mutationFn: (args: { acc: string; frozen: boolean }) => api.paperFreeze(args.frozen, args.acc),
-    onSuccess: () => qc.invalidateQueries({ queryKey: QK.paperAll }),
-  })
   // 60s 轻轮询: 盘中自动跟单下单 / 盘后结算后榜单自然刷新 (保留旧数据防闪烁)。
   // 非交易时段榜单不变, 降为 5 分钟兜底 (字段缺失保持 60s)
   const { data: quoteStatus } = useQuoteStatus()
@@ -1523,12 +1522,28 @@ function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
     refetchInterval: () => (quoteStatus?.is_trading_hours === false ? 300_000 : 60_000),
     placeholderData: (prev: any) => prev,
   })
+  // 跨账户实时撮合流水: 盘中 5s 轮询 (后端 3s 共享缓存), 休市 30s 兜底
+  const feedQ = useQuery({
+    queryKey: ['paper-live-feed'],
+    queryFn: () => api.paperLiveFeed(60),
+    refetchInterval: () => (quoteStatus?.is_trading_hours === false ? 30_000 : 5_000),
+    placeholderData: (prev: any) => prev,
+    staleTime: 3_000,
+  })
 
   const rows = cmpQ.data?.accounts ?? []
+  // 最近有真实委托 / 仍在撮合的账户 → 卡片上显示 LIVE / 撮合中脉冲
+  const liveAccounts = useMemo(
+    () => new Set((feedQ.data?.items ?? []).map(it => it.account)),
+    [feedQ.data],
+  )
+  const matchingAccounts = useMemo(
+    () => new Set((feedQ.data?.items ?? []).filter(it => it.status === 'pending').map(it => it.account)),
+    [feedQ.data],
+  )
   const executionQ = useQuery({ queryKey: executionListKey, queryFn: executionApi.list, enabled: rows.length > 0, refetchInterval: 60_000, retry: false })
   const executionByAccount = new Map(executionQ.data?.bindings.map(b => [b.account, b]))
-  // 收益口径固定排序: 统计卡「收益最高」与净值叠加「收益前 8 名」不受表头排序影响
-  const byPnl = useMemo(() => [...rows].sort((a, b) => (b.pnl_pct ?? -1e9) - (a.pnl_pct ?? -1e9)), [rows])
+  // 排序后的账户列表 (节点条 / 资金全景右侧账户共用)
   const sorted = useMemo(() => {
     const dir = sort.desc ? -1 : 1
     const isNull = CMP_NULLABLE[sort.key]
@@ -1545,17 +1560,90 @@ function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
       return c * dir
     })
   }, [rows, sort])
-  const chartRows = byPnl.filter(r => r.nav.length > 0).slice(0, 8)
   const avgPct = rows.length > 0
     ? rows.reduce((s, r) => s + (r.pnl_pct ?? 0), 0) / rows.length
     : null
   const totalAssets = rows.reduce((s, r) => s + (r.total ?? 0), 0)
+  const dayPcts = rows.map(r => r.day_change_pct).filter((v): v is number => v != null)
+  const avgDay = dayPcts.length > 0 ? dayPcts.reduce((s, v) => s + v, 0) / dayPcts.length : null
+  const totalHoldings = rows.reduce((s, r) => s + (r.holdings_count ?? 0), 0)
+  const lastSettle = rows.map(r => r.last_nav_date).filter(Boolean).sort().at(-1) ?? null
+  const selectedRow = sorted.find(r => r.account === expanded) ?? null
+  const focused = sorted.find(r => r.account === (focusAcc ?? expanded ?? feedQ.data?.items[0]?.account)) ?? sorted[0] ?? null
+  const feedItems = feedQ.data?.items ?? []
+  // 左栏: 真实成交回报聚合出的标的流 (同一标的按笔数排序)
+  const symbols = useMemo<FlowSymbol[]>(() => {
+    const map = new Map<string, FlowSymbol>()
+    for (const it of feedItems) {
+      const cur = map.get(it.symbol)
+      if (!cur) {
+        map.set(it.symbol, {
+          symbol: it.symbol,
+          name: it.symbol_name || '',
+          price: it.last_price ?? it.fill_price ?? null,
+          changePct: it.change_pct ?? null,
+          side: it.side,
+          count: 1,
+        })
+      } else {
+        cur.count += 1
+        if (it.last_price != null) cur.price = it.last_price
+        else if (it.fill_price != null) cur.price = it.fill_price
+        if (it.change_pct != null) cur.changePct = it.change_pct
+        if (it.symbol_name) cur.name = it.symbol_name
+        cur.side = it.side
+      }
+    }
+    return [...map.values()].sort((a, b) => b.count - a.count).slice(0, 32)
+  }, [feedQ.data])
+  // 中栏: 参数跟单绑定 + 各账户已绑定的自动跟单规则 (真实策略库)
+  const strategies = useMemo<FlowStrategy[]>(() => {
+    const out: FlowStrategy[] = []
+    for (const [acc, b] of executionByAccount) {
+      const owner = rows.find(r => r.account === acc)
+      out.push({
+        id: `${acc}:exec`,
+        name: b.name,
+        account: acc,
+        accountName: owner?.name ?? acc,
+        enabled: b.enabled,
+        kind: 'strategy',
+        side: 'buy',
+      })
+    }
+    for (const r of sorted) {
+      for (const ar of r.auto_rules ?? []) {
+        out.push({
+          id: `${r.account}:${ar.match_kind}:${ar.match_id}`,
+          name: ar.name,
+          account: r.account,
+          accountName: r.name,
+          enabled: ar.enabled,
+          kind: ar.match_kind,
+          side: ar.side,
+        })
+      }
+    }
+    return out
+  }, [sorted, executionQ.data])  // 终端渲染在编队下方: 打开后自动滚到终端, 避免「点了没反应」的错觉。
+  // 账户面板的行情/订单请求约 1s 才回, 内容撑高后需要再滚一次才能对齐顶部。
+  const terminalRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!expanded) return
+    const smooth = !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const scroll = () => terminalRef.current?.scrollIntoView({
+      block: 'start',
+      behavior: smooth ? 'smooth' : 'auto',
+    })
+    const timers = [180, 700, 1500].map(ms => window.setTimeout(scroll, ms))
+    return () => timers.forEach(t => window.clearTimeout(t))
+  }, [expanded])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="tf-paper flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="模拟盘"
-        subtitle="多账户并行对比 — 同本金 · 同费率 · 点表头排序, 点行展开完整账户操作"
+        subtitle="资金全景 — 行情 → 策略 → 账户, 实时资本流向"
         right={
           <div className="flex items-center gap-2">
             <button
@@ -1626,169 +1714,152 @@ function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
           </div>
         ) : (
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-              <StatCard label="对比账户" value={String(rows.length)} icon={Wallet} iconCls="text-accent" />
-              <StatCard label="合计虚拟资产" value={fmtMoney(totalAssets, 0)} icon={Banknote} iconCls="text-muted" />
-              <StatCard
-                label="平均累计收益"
-                value={avgPct == null ? '—' : fmtPct(avgPct / 100)}
-                valueClass={priceColorClass((avgPct ?? 0) / 100)}
-                icon={TrendingUp}
-                iconCls={priceColorClass((avgPct ?? 0) / 100)}
-              />
-              <StatCard
-                label="收益最高"
-                value={byPnl[0].name}
-                sub={byPnl.length > 1 ? `+${(byPnl[0].pnl_pct ?? 0).toFixed(2)}% 高于第2名 ${((byPnl[0].pnl_pct ?? 0) - (byPnl[1].pnl_pct ?? 0)).toFixed(2)}pct` : undefined}
-                valueClass="text-accent"
-                icon={TrendingUp}
-                iconCls="text-accent"
-              />
+            {/* ===== 指挥台: 紧凑数据头 ===== */}
+            <div className="tf-desk">
+              <span className="tf-desk-grid" aria-hidden="true" />
+              <span className="tf-desk-beacon" aria-hidden="true" />
+              <div className="relative flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="tf-live-dot" aria-hidden="true" />
+                <span className="font-mono text-[10px] tracking-[0.26em] text-muted">PAPER ARENA · SIM DESK</span>
+                <DeskClock />
+                <span className={cn('tf-engine-state', rows.length > 0 && 'is-running')}>
+                  {rows.length > 0 ? '引擎在线' : '待接入'}
+                </span>
+                <div className="ml-auto flex items-center gap-1.5">
+                  <span className="hidden text-[10px] text-muted sm:inline">排序</span>
+                  <select
+                    value={sort.key}
+                    onChange={e => {
+                      const key = e.target.value as CmpSortKey
+                      setSort(s => ({ key, desc: key === 'name' ? false : s.key === key ? s.desc : true }))
+                    }}
+                    className="rounded-btn border border-border bg-elevated/60 px-2 py-1 text-[11px] text-secondary outline-none transition-colors hover:border-accent/40 focus:border-accent/60"
+                    title="排序字段"
+                  >
+                    {CMP_SORT_OPTIONS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setSort(s => ({ ...s, desc: !s.desc }))}
+                    className="rounded-btn border border-border p-1 text-muted transition-colors hover:border-accent/40 hover:text-accent"
+                    title={sort.desc ? '当前降序, 点击升序' : '当前升序, 点击降序'}
+                  >
+                    {sort.desc ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
+                  </button>
+                </div>
+              </div>
+              <div className="relative mt-2 flex flex-wrap items-end gap-x-7 gap-y-2">
+                <div>
+                  <div className="text-[9px] tracking-[0.18em] text-muted">TOTAL EQUITY</div>
+                  <div className="mt-0.5 flex items-baseline gap-2">
+                    <AnimatedNumber
+                      value={totalAssets}
+                      format={v => fmtMoney(v, 0)}
+                      resetKey={lastSettle ?? undefined}
+                      className="font-mono text-[30px] font-semibold leading-none tabular tracking-tight"
+                    />
+                    <span className={cn('font-mono text-xs tabular', priceColorClass((avgPct ?? 0) / 100))}>
+                      {avgPct == null ? '—' : fmtPct(avgPct / 100)}
+                    </span>
+                    <span className="text-[9px] text-muted">平均累计</span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-4">
+                  {[
+                    { k: '编队', v: String(rows.length) },
+                    { k: '持仓', v: String(totalHoldings) },
+                    { k: '平均日涨跌', v: avgDay == null ? '—' : fmtPct(avgDay / 100), cls: avgDay == null ? '' : priceColorClass(avgDay / 100) },
+                    { k: '最近结算', v: lastSettle ?? '—' },
+                  ].map(it => (
+                    <div key={it.k} className="min-w-[72px]">
+                      <div className="text-[9px] text-muted">{it.k}</div>
+                      <div className={cn('font-mono text-sm tabular text-secondary', it.cls)}>{it.v}</div>
+                    </div>
+                  ))}
+                </div>
+                <PulseLine live className="ml-auto h-5 w-24 opacity-70" />
+              </div>
             </div>
 
-            {chartRows.length > 1 && (
-              <div className="rounded-card border border-border bg-surface p-4">
-                <div className="text-sm font-medium">归一化净值叠加 <span className="ml-1 text-[10px] text-muted">起点 = 1, 收益前 8 名 · 不同本金公平对比</span></div>
-                <CompareChart rows={chartRows} />
+            {/* ===== 账户节点条: 无缝滚动, 点击聚焦/展开 ===== */}
+            <div className="tf-node-strip">
+              <span className="tf-node-strip-tag">NODES</span>
+              <div className="tf-node-rail">
+                <div className="tf-node-track">
+                  {[...sorted, ...sorted].map((r, i) => {
+                    const pct = r.estimating ? (r.live_pnl_pct ?? r.pnl_pct ?? 0) : (r.pnl_pct ?? 0)
+                    const active = focused?.account === r.account
+                    return (
+                      <button
+                        key={`${r.account}-${i}`}
+                        type="button"
+                        onClick={() => {
+                          setFocusAcc(r.account)
+                          setExpanded(r.account)
+                        }}
+                        className={cn('tf-node-chip', active && 'is-active', r.status === 'frozen' && 'is-frozen')}
+                        title={`${r.name} · ${r.account} · 累计 ${fmtPct(pct / 100)}`}
+                      >
+                        <span className="tf-node-rank">{sorted.length ? (i % sorted.length) + 1 : 1}</span>
+                        {r.market && r.market !== 'cn' && <span className="tf-node-mkt">{PNL_MKT_LABEL[r.market]}</span>}
+                        <span className="max-w-24 truncate">{r.name}</span>
+                        <b className={cn('font-mono tabular', priceColorClass(pct / 100))}>{fmtPct(pct / 100)}</b>
+                        {(matchingAccounts.has(r.account) || liveAccounts.has(r.account)) && (
+                          <span
+                            className={cn('tf-node-live', matchingAccounts.has(r.account) && 'is-matching')}
+                            aria-hidden="true"
+                          />
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <PnlBoard
+              rows={sorted}
+              onOpen={r => {
+                setFocusAcc(r.account)
+                setExpanded(r.account)
+              }}
+            />
+
+            <CapitalFlowStage
+              symbols={symbols}
+              strategies={strategies}
+              accounts={sorted}
+              focusAccount={focused}
+              orders={feedItems}
+              totals={feedQ.data?.totals}
+              onSelectAccount={acc => setFocusAcc(acc)}
+              onOpenTerminal={acc => {
+                setFocusAcc(acc.account)
+                setExpanded(acc.account)
+              }}
+            />
+
+            {selectedRow && (
+              <div ref={terminalRef} className="tf-terminal scroll-mt-24">
+                <div className="tf-terminal-bar">
+                  <span className="tf-live-dot" aria-hidden="true" />
+                  <span className="font-mono text-[10px] tracking-[0.22em] text-muted">EXECUTION TERMINAL</span>
+                  <span className="h-3 w-px bg-border" aria-hidden="true" />
+                  <span className="truncate text-sm font-medium">{selectedRow.name}</span>
+                  <span className="hidden truncate font-mono text-[10px] text-muted sm:inline">{selectedRow.account}</span>
+                  <button
+                    onClick={() => setExpanded(null)}
+                    className="ml-auto inline-flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-[10px] text-muted transition-colors hover:border-danger/40 hover:text-danger"
+                  >
+                    <X className="h-3 w-3" />
+                    关闭终端
+                  </button>
+                </div>
+                <div className="p-4">
+                  <AccountPanel acc={selectedRow.account} name={selectedRow.name} onDeleted={() => setExpanded(null)} />
+                </div>
               </div>
             )}
-
-            <div className="rounded-card border border-border bg-surface p-4">
-              <div className="flex items-center gap-2">
-                <div className="text-sm font-medium">收益对比</div>
-                <span className="text-[10px] text-muted">点表头排序 · 点行展开完整账户操作</span>
-                <span className="ml-auto text-[10px] text-muted" title="定版字段结算后更新; 盘中快照就绪时总资产/收益显示实时估算 (估 徽标)">
-                  {rows.some(r => r.estimating) ? '总资产 / 收益为盘中实时估算 · 其余截至最近结算日' : '数据截至最近结算日'}
-                </span>
-              </div>
-              <div className="mt-2 overflow-x-auto">
-                <table className="w-full min-w-[1100px] text-xs">
-                  <thead>
-                    <tr className="border-b border-border text-left text-[10px] text-muted">
-                      <th className="py-1.5 pr-1 font-medium">#</th>
-                      <SortTh label="账户" sortKey="name" sort={sort} onSort={onSortCmp} />
-                      <SortTh label="总资产" sortKey="total" sort={sort} onSort={onSortCmp} align="right" title="定版口径; 盘中快照就绪时显示实时估算" />
-                      <SortTh label="累计收益" sortKey="pnl_pct" sort={sort} onSort={onSortCmp} align="right" />
-                      <SortTh label="最新日" sortKey="day_change_pct" sort={sort} onSort={onSortCmp} align="right" title="最近两个定版净值的涨跌" />
-                      <SortTh label="已实现" sortKey="realized_pnl" sort={sort} onSort={onSortCmp} align="right" title="FIFO 回合已落袋盈亏 (含费用)" />
-                      <SortTh label="回撤" sortKey="max_drawdown" sort={sort} onSort={onSortCmp} align="right" title="定版净值序列最大回撤" />
-                      <SortTh label="胜率" sortKey="win_rate" sort={sort} onSort={onSortCmp} align="right" />
-                      <SortTh label="盈亏比" sortKey="profit_loss_ratio" sort={sort} onSort={onSortCmp} align="right" title="平均盈利回合 / 平均亏损回合, 无亏损回合时为空" />
-                      <SortTh label="回合" sortKey="rounds" sort={sort} onSort={onSortCmp} align="right" title="FIFO 配对的完整买卖回合" />
-                      <SortTh label="持仓" sortKey="holdings_count" sort={sort} onSort={onSortCmp} align="right" />
-                      <th className="py-1.5 text-center font-medium">净值趋势</th>
-                      <SortTh label="最近结算" sortKey="last_nav_date" sort={sort} onSort={onSortCmp} align="right" />
-                      {/* 操作列 sticky 贴右: 14 列宽表在窄视口横向滚动时, 冻结/删除入口始终可见。
-                          box-shadow 在 border-collapse 表格上不渲染, 分界用 1px 左边框。 */}
-                      <th className="sticky right-0 z-10 w-16 border-l border-border/60 bg-surface/95 py-1.5 text-center font-medium backdrop-blur-sm" title="冻结切换 / 删除账户">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sorted.map((r, i) => {
-                      const open = expanded === r.account
-                      return (
-                        <Fragment key={r.account}>
-                          <tr
-                            className={cn(
-                              'cursor-pointer border-t border-border/50 transition-colors hover:bg-elevated/40',
-                              open && 'bg-elevated/30',
-                              r.status === 'frozen' && !open && 'opacity-60',
-                            )}
-                            onClick={() => setExpanded(open ? null : r.account)}
-                          >
-                            <td className="py-2 pr-1" title="当前排序列位 (仅按累计收益降序时高亮为收益名次)"><RankBadge rank={i + 1} accent={sort.key === 'pnl_pct' && sort.desc} /></td>
-                            <td className="py-2">
-                              <div className="flex items-center gap-1.5">
-                                <span className="max-w-44 truncate text-xs font-medium">{r.name}</span>
-                                {executionByAccount.has(r.account) && <span className="max-w-36 truncate rounded-full bg-accent/10 px-1.5 py-px text-[9px] leading-4 text-accent" title={executionByAccount.get(r.account)!.message}>
-                                  {executionByAccount.get(r.account)!.name} · {executionByAccount.get(r.account)!.enabled ? '参数跟单' : '已暂停'}
-                                </span>}
-                                {r.status === 'frozen' && <span className="rounded-full bg-warning/15 px-1.5 py-px text-[9px] leading-4 text-warning">冻结</span>}
-                                {(r.auto_rules ?? []).slice(0, 2).map((ar, j) => (
-                                  <span
-                                    key={`${ar.match_id}-${j}`}
-                                    className={cn('max-w-32 truncate rounded-full px-1.5 py-px text-[9px] leading-4', ar.enabled ? 'bg-accent/10 text-accent' : 'bg-elevated text-muted')}
-                                    title={`${ar.name} · ${ar.match_kind === 'strategy' ? '跟策略' : '跟规则'} ${ar.match_id}${ar.side === 'sell' ? ' · 卖出方向' : ''}`}
-                                  >
-                                    {ar.name}{ar.side === 'sell' ? '·卖' : ''}
-                                  </span>
-                                ))}
-                                {(r.auto_rules?.length ?? 0) > 2 && (
-                                  <span className="shrink-0 text-[9px] text-muted" title={r.auto_rules!.slice(2).map(a => a.name).join(' / ')}>+{r.auto_rules!.length - 2}</span>
-                                )}
-                              </div>
-                              <div className="font-mono text-[10px] text-muted">{r.account}</div>
-                            </td>
-                            <td className="py-2 text-right font-mono tabular">
-                              <span className="inline-flex items-baseline justify-end gap-1">
-                                {fmtMoney(r.estimating ? (r.live_total ?? r.total) : r.total, 0)}
-                                {r.estimating && <span className="text-[9px] font-sans text-accent" title="盘中快照价实时估算, 收盘后定版">估</span>}
-                              </span>
-                            </td>
-                            <td className="py-2 text-right font-mono font-semibold tabular">
-                              <span className={priceColorClass((r.estimating ? (r.live_pnl_pct ?? r.pnl_pct ?? 0) : (r.pnl_pct ?? 0)) / 100)}>
-                                {fmtPct(((r.estimating ? (r.live_pnl_pct ?? r.pnl_pct ?? 0) : (r.pnl_pct ?? 0))) / 100)}
-                              </span>
-                            </td>
-                            <td className="py-2 text-right font-mono tabular">
-                              {r.day_change_pct != null
-                                ? <span className={priceColorClass(r.day_change_pct / 100)}>{fmtPct(r.day_change_pct / 100)}</span>
-                                : <span className="text-muted">—</span>}
-                            </td>
-                            <td className={cn('py-2 text-right font-mono tabular', priceColorClass(r.realized_pnl ?? 0))}>
-                              {(r.realized_pnl ?? 0) >= 0 ? '+' : ''}{fmtMoney(r.realized_pnl ?? 0, 0)}
-                            </td>
-                            <td className="py-2 text-right font-mono tabular text-secondary">
-                              {r.max_drawdown != null
-                                ? r.max_drawdown > 0 ? `-${r.max_drawdown.toFixed(1)}%` : '0.0%'
-                                : <span className="text-muted">—</span>}
-                            </td>
-                            <td className="py-2 text-right font-mono tabular text-secondary">{r.win_rate.toFixed(1)}%</td>
-                            <td className="py-2 text-right font-mono tabular text-secondary">
-                              {r.profit_loss_ratio != null ? r.profit_loss_ratio : <span className="text-muted">—</span>}
-                            </td>
-                            <td className="py-2 text-right font-mono tabular text-muted">{r.rounds}</td>
-                            <td className="py-2 text-right font-mono tabular text-secondary">{r.holdings_count ?? 0}</td>
-                            <td className="py-1.5"><NavSpark nav={r.nav} /></td>
-                            <td className="py-2 text-right font-mono text-[11px] text-muted">{r.last_nav_date ?? '—'}</td>
-                            <td className="sticky right-0 z-10 border-l border-border/60 bg-surface/95 py-2 text-right backdrop-blur-sm" onClick={e => e.stopPropagation()}>
-                              <div className="flex items-center justify-end gap-0.5">
-                                <button
-                                  onClick={() => freezeM.mutate({ acc: r.account, frozen: r.status !== 'frozen' })}
-                                  disabled={freezeM.isPending}
-                                  className={cn(
-                                    'rounded p-1 transition-colors',
-                                    r.status === 'frozen' ? 'text-warning hover:bg-warning/10' : 'text-muted hover:bg-elevated hover:text-warning',
-                                  )}
-                                  title={r.status === 'frozen' ? '解冻账户 (恢复下单与跟单)' : '冻结账户 (拒绝新订单, 持仓只读)'}
-                                >
-                                  <Snowflake className="h-3.5 w-3.5" />
-                                </button>
-                                <button
-                                  onClick={() => setDeleting(r)}
-                                  className="rounded p-1 text-muted transition-colors hover:bg-danger/10 hover:text-danger"
-                                  title="删除账户 (含全部数据, 需二次确认)"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                                <ChevronDown className={cn('ml-0.5 inline h-3.5 w-3.5 text-muted transition-transform duration-150', open && 'rotate-180')} />
-                              </div>
-                            </td>
-                          </tr>
-                          {open && (
-                            <tr className="border-t border-border/50 bg-base/40">
-                              <td colSpan={14} className="px-4 py-4">
-                                <AccountPanel acc={r.account} name={r.name} onDeleted={() => setExpanded(null)} />
-                              </td>
-                            </tr>
-                          )}
-                        </Fragment>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
           </div>
         )}
       </div>
@@ -1820,9 +1891,11 @@ type BatchSourceRow = { name: string; kind: 'strategy' | 'rule'; matchId: string
 function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (count: number) => void }) {
   const qc = useQueryClient()
   const defaults = loadNewAccountDefaults()
+  const { market: globalMarket } = useMarket()
+  const [market, setMarket] = useState<Market>(globalMarket)
   const [cash, setCash] = useState(defaults.cash)
   const [commissionWan, setCommissionWan] = useState(defaults.commissionWan)
-  const [stampQian, setStampQian] = useState(defaults.stampQian)
+  const [stampQian, setStampQian] = useState(defaultStampQian(globalMarket, defaults.stampQian))
   const [slippageBps, setSlippageBps] = useState(defaults.slippageBps)
   const [prefix, setPrefix] = useState('')
   const [rows, setRows] = useState<BatchSourceRow[]>([])
@@ -1850,6 +1923,7 @@ function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreat
       api.paperArenaCreate({
         initial_cash: Number(cash),
         name_prefix: prefix.trim() || undefined,
+        market,
         commission_pct: Number(commissionWan) / 10000,   // 万 X → pct
         stamp_tax_pct: Number(stampQian) / 1000,         // 千 X → pct
         slippage_bps: Number(slippageBps),
@@ -1880,7 +1954,7 @@ function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreat
     if (row.kind === 'rule') setSide(s => (s === 'auto' ? 'buy' : s))
   }
   const addAllStrategies = () => {
-    const presets = selectableStrategies(strategiesQ.data?.presets ?? []).slice(0, 20)
+    const presets = selectableStrategies(strategiesQ.data?.presets ?? [])
     setRows(prev => {
       const seen = new Set(prev.map(r => r.matchId))
       return [...prev, ...presets.filter(p => !seen.has(p.id)).map(p => ({ name: p.name || p.id, kind: 'strategy' as const, matchId: p.id }))]
@@ -1961,9 +2035,9 @@ function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreat
                 onClick={addAllStrategies}
                 disabled={selectableStrategies(strategiesQ.data?.presets ?? []).length === 0}
                 className="rounded-btn border border-border px-2.5 py-1 text-[11px] text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-40"
-                title="把现有策略各开一个账户 (最多 20 个)"
+                title="把现有策略各开一个账户 (单次最多 60 个)"
               >
-                全部策略一键加入 ({Math.min(selectableStrategies(strategiesQ.data?.presets ?? []).length, 20)})
+                全部策略一键加入 ({selectableStrategies(strategiesQ.data?.presets ?? []).length})
               </button>
             )}
           </div>
@@ -2000,6 +2074,18 @@ function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreat
           <div>
             <label className={labelCls}>账户名前缀 (可选)</label>
             <input value={prefix} onChange={e => setPrefix(e.target.value)} className={cn(inputCls, 'mt-1 font-sans')} placeholder="如: 第一期-" />
+          </div>
+          <div>
+            <label className={labelCls}>交易市场</label>
+            <select value={market} onChange={e => {
+          const next = e.target.value as Market
+          setMarket(next)
+          setStampQian(defaultStampQian(next, defaults.stampQian))
+        }} className={cn(inputCls, 'mt-1 font-sans')}>
+              <option value="cn">A股</option>
+              <option value="hk">港股</option>
+              <option value="us">美股</option>
+            </select>
           </div>
           {rows.length > 0 && rows.every(r => r.kind === 'strategy') ? (
             <div className="self-end pb-1.5 text-[10px] leading-4 text-muted">
@@ -2080,8 +2166,183 @@ function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreat
         </div>
         {m.isError && <div className="mt-2 rounded-btn bg-danger/10 px-2 py-1.5 text-[11px] text-danger">{String((m.error as Error).message)}</div>}
         <div className="mt-2 text-[10px] leading-relaxed text-muted">
-          创建后各账户立即参与盘中自动跟单 (规则触发 → 下单 → T+1 约束), 每交易日盘后管道统一结算定版净值, 对比榜单自动更新。
+          创建后各账户立即参与盘中自动跟单 (规则触发 → 下单 → {market === 'cn' ? 'T+1' : 'T+0'} 约束), 每交易日盘后管道统一结算定版净值, 对比榜单自动更新。
         </div>
+      </div>
+    </Modal>
+  )
+}
+
+/** 日期加减 (UTC, 只做 K 线窗口前后留白, 不参与交易日期判断) */
+function shiftIsoDate(day: string, delta: number): string {
+  const d = new Date(`${day}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + delta)
+  return d.toISOString().slice(0, 10)
+}
+
+/** 单标的成交回放: 日 K + 买卖标记 + 成交明细 + 区间统计。只读，不修改台账。 */
+function PaperReplayModal({ acc, symbol, onClose }: { acc: string; symbol: string; onClose: () => void }) {
+  const [chartWindow, setChartWindow] = useState<'all' | '1y'>('all')
+  const replayQ = useQuery({
+    queryKey: QK.paperReplay(acc, symbol),
+    queryFn: () => api.paperReplay(symbol, { account: acc }),
+  })
+  const data: PaperReplayResponse | undefined = replayQ.data
+
+  const chartRange = useMemo(() => {
+    const base = getDefaultRange()
+    if (chartWindow === '1y' || !data) return base
+    const dates = data.fills.map(f => f.date).filter(Boolean)
+    if (dates.length === 0) return base
+    const first = dates.reduce((a, b) => (a < b ? a : b))
+    const last = dates.reduce((a, b) => (a > b ? a : b))
+    return {
+      start: first < base.start ? shiftIsoDate(first, -20) : base.start,
+      end: last > base.end ? shiftIsoDate(last, 20) : base.end,
+    }
+  }, [data, chartWindow])
+
+  const markers: ChartMarker[] = useMemo(
+    () => (data?.markers ?? []).map(m => ({
+      date: m.date,
+      kind: m.kind,
+      label: m.label,
+      above: m.above,
+      ...(m.kind === 'neutral' ? { color: '#8B5CF6' } : {}),
+    })),
+    [data],
+  )
+
+  const s = data?.summary
+  const winRate = s?.win_rate
+  return (
+    <Modal
+      onClose={onClose}
+      labelledBy="paper-replay-title"
+      panelClassName="w-[96vw] max-w-6xl max-h-[92vh] overflow-y-auto bg-surface border border-border rounded-card shadow-xl"
+    >
+      <div className="p-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <TrendingUp className="h-4 w-4 text-accent" />
+          <h3 id="paper-replay-title" className="text-sm font-semibold text-foreground">
+            成交回放
+            <span className="ml-2 font-mono text-[11px] text-muted">{data?.symbol ?? symbol}</span>
+            {data?.name && data.name !== data.symbol && (
+              <span className="ml-1.5 text-[11px] font-normal text-secondary">{data.name}</span>
+            )}
+          </h3>
+          {data && (
+            <span className="rounded-full bg-elevated px-2 py-0.5 text-[10px] text-muted">
+              {data.market.toUpperCase()}
+            </span>
+          )}
+          {data?.strategy?.name && (
+            <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] text-accent" title={data.strategy.source ?? undefined}>
+              策略 · {data.strategy.name}
+            </span>
+          )}
+          <button
+            onClick={onClose}
+            className="ml-auto rounded-btn border border-border px-2.5 py-1 text-xs text-muted transition-colors hover:border-accent/40 hover:text-accent"
+          >
+            关闭
+          </button>
+        </div>
+
+        {replayQ.isLoading && <div className="py-12 text-center text-xs text-muted">加载回放数据…</div>}
+        {replayQ.isError && (
+          <div className="mt-4 rounded-btn bg-danger/10 px-3 py-2 text-xs text-danger">
+            回放加载失败: {String((replayQ.error as Error).message)}
+          </div>
+        )}
+
+        {data && s && (
+          <>
+            <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+              <StatCard label="买入" value={`${s.buys} 笔`} sub={fmtMoney(s.buy_amount, 0)} />
+              <StatCard label="卖出" value={`${s.sells} 笔`} sub={fmtMoney(s.sell_amount, 0)} />
+              <StatCard label="费用" value={fmtMoney(s.fees)} />
+              <StatCard
+                label="已实现盈亏"
+                value={`${s.realized_pnl >= 0 ? '+' : ''}${fmtMoney(s.realized_pnl, 0)}`}
+                valueClass={priceColorClass(s.realized_pnl)}
+              />
+              <StatCard label="胜率" value={winRate == null ? '--' : `${winRate.toFixed(1)}%`} sub={`${s.rounds} 个回合`} />
+              <StatCard label="期末持仓" value={`${s.open_qty} 股`} sub={s.avg_holding_days == null ? undefined : `均持 ${s.avg_holding_days} 天`} />
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+              <span>图表窗口</span>
+              {(['all', '1y'] as const).map(w => (
+                <button
+                  key={w}
+                  onClick={() => setChartWindow(w)}
+                  className={cn(
+                    'rounded-btn border px-2 py-0.5 transition-colors',
+                    chartWindow === w ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted hover:text-secondary',
+                  )}
+                >
+                  {w === 'all' ? '全部成交' : '近一年'}
+                </button>
+              ))}
+              {data.truncated && (
+                <span className="text-warning">成交过多，明细仅显示最近 {data.fills.length} / {data.total_fills} 笔</span>
+              )}
+              {s.corp_actions > 0 && <span>区间内 {s.corp_actions} 次除权调整</span>}
+            </div>
+
+            <div className="mt-2 rounded-card border border-border bg-base/30 p-2">
+              <StockDailyKChart
+                symbol={data.symbol}
+                dateRange={chartRange}
+                markers={markers}
+                height={360}
+                visibleBars={120}
+                showLimitMarkers={false}
+                showIndicatorControls={false}
+                showMarkerToggle={false}
+                showMA
+              />
+            </div>
+
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full min-w-[640px] text-xs">
+                <thead>
+                  <tr className="text-left text-[10px] text-muted">
+                    <th className="py-1.5 font-normal">日期</th>
+                    <th className="py-1.5 font-normal">方向</th>
+                    <th className="py-1.5 text-right font-normal">数量</th>
+                    <th className="py-1.5 text-right font-normal">成交价</th>
+                    <th className="py-1.5 text-right font-normal">费用</th>
+                    <th className="py-1.5 font-normal">原因</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {data.fills.length === 0 && (
+                    <tr><td colSpan={6} className="py-8 text-center font-sans text-xs text-muted">区间内无成交</td></tr>
+                  )}
+                  {[...data.fills].reverse().map(f => (
+                    <tr key={`${f.seq}-${f.order_id ?? f.date}`} className="border-t border-border/50 transition-colors hover:bg-elevated/40">
+                      <td className="py-1.5 text-muted">{f.date}</td>
+                      <td className={cn('py-1.5 font-sans font-medium', f.side === 'buy' ? 'text-bull' : 'text-bear')}>
+                        {f.side === 'buy' ? '买入' : '卖出'}
+                      </td>
+                      <td className="py-1.5 text-right">{f.qty}</td>
+                      <td className="py-1.5 text-right">{fmtMoney(f.price, 3)}</td>
+                      <td className="py-1.5 text-right text-muted">{fmtMoney(f.fee)}</td>
+                      <td className="py-1.5 font-sans text-secondary">
+                        {f.reason_label}
+                        {f.reason && f.reason !== f.reason_label && (
+                          <span className="ml-1 text-[10px] text-muted">{f.reason}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </div>
     </Modal>
   )
@@ -2112,6 +2373,687 @@ export function Paper() {
   )
 }
 
+/** 北京时间交易日 (与行情/撮合口径一致), 用于「本日委托/成交」计数。 */
+function paperTradingDay(): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
+  } catch {
+    return new Date().toISOString().slice(0, 10)
+  }
+}
+
+const ENGINE_STATE_LABEL: Record<string, string> = {
+  running: '运行中',
+  waiting: '等待信号',
+  paused: '已暂停',
+  blocked: '已阻断',
+  idle: '待接入',
+}
+
+const LIVE_STATUS_LABEL: Record<string, string> = {
+  pending: '撮合中',
+  filled: '已成交',
+  cancelled: '已撤单',
+  expired: '已过期',
+}
+
+const fmtFeedTime = (s?: string | null) => (s && s.length >= 19 ? s.slice(11, 19) : '—')
+
+/** 指挥台时钟: 每秒走字, 给页面一个持续的心跳。 */
+function DeskClock() {
+  const [clock, setClock] = useState(() => new Date())
+  useEffect(() => {
+    const id = window.setInterval(() => setClock(new Date()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+  return (
+    <span className="tf-desk-clock font-mono text-[10px] text-muted">
+      {clock.toLocaleTimeString('zh-CN', { hour12: false })} CST
+    </span>
+  )
+}
+
+interface FlowSymbol {
+  symbol: string
+  name: string
+  price: number | null
+  changePct: number | null
+  side: 'buy' | 'sell'
+  count: number
+}
+
+interface FlowStrategy {
+  id: string
+  name: string
+  account: string
+  accountName: string
+  enabled: boolean
+  kind: string
+  side: 'buy' | 'sell'
+}
+
+/** 资金全景: 行情 → 策略 → 账户 三栏资本流, 曲线与粒子持续流动。
+ *  右栏账户每 5s 自动轮播 (悬停暂停), 点击策略/节点可立即跳转。 */
+function CapitalFlowStage({ symbols, strategies, accounts, focusAccount, orders, totals, onOpenTerminal, onSelectAccount }: {
+  symbols: FlowSymbol[]
+  strategies: FlowStrategy[]
+  accounts: PaperCompareRow[]
+  focusAccount: PaperCompareRow | null
+  orders: PaperLiveItem[]
+  totals?: PaperLiveTotals
+  onOpenTerminal: (acc: PaperCompareRow) => void
+  onSelectAccount: (acc: string) => void
+}) {
+  const [idx, setIdx] = useState(0)
+  // 轮播顺序: 最近有真实委托的账户优先; 顺序仅在账户集合变化时重排,
+  // 避免每 5s 流水刷新导致下标跳号 (表现为「暂停/卡顿」)。
+  const rotation = useMemo(() => {
+    const withOrders = new Set(orders.map(o => o.account))
+    return [
+      ...accounts.filter(a => withOrders.has(a.account)),
+      ...accounts.filter(a => !withOrders.has(a.account)),
+    ]
+  }, [accounts.map(a => a.account).join('|'), orders.length > 0])
+  const count = rotation.length
+  // rotation 会随数据刷新换引用, 用 ref 避免把自动切换的下标重置回去
+  const rotationRef = useRef(rotation)
+  rotationRef.current = rotation
+
+  // 外部点击节点/策略时跳到该账户
+  useEffect(() => {
+    if (!focusAccount) return
+    const i = rotationRef.current.findIndex(a => a.account === focusAccount.account)
+    if (i >= 0) setIdx(i)
+  }, [focusAccount?.account])
+
+  // 每 5s 轮播下一个账户 (不因悬停/数据刷新暂停)
+  useEffect(() => {
+    if (count <= 1) return
+    const id = window.setInterval(() => setIdx(i => (i + 1) % count), 5000)
+    return () => window.clearInterval(id)
+  }, [count])
+
+  const account = rotation[Math.min(idx, Math.max(0, count - 1))] ?? focusAccount ?? null
+  const accountOrders = account ? orders.filter(o => o.account === account.account) : []
+
+  // 光子通道: 左栏标的 → 策略核心 → 右栏账户。走三栏之间的空档, 不做满屏连线。
+  const slotCoreX = 500
+  const flows = useMemo(() => {
+    const out: Array<{ id: string; d: string; side: 'buy' | 'sell'; dur: number; bus?: boolean }> = []
+    symbols.slice(0, 7).forEach((s, i) => {
+      const y = 92 + i * 58
+      out.push({
+        id: `in-${s.symbol}-${i}`,
+        d: `M 206 ${y} C 320 ${y} 360 330 ${slotCoreX} 330`,
+        side: s.side,
+        dur: 3.4 + (i % 3) * 0.55,
+      })
+    })
+    strategies.slice(0, 5).forEach((s, i) => {
+      const y = 120 + i * 92
+      out.push({
+        id: `out-${s.account}-${i}`,
+        d: `M ${slotCoreX} 330 C 640 330 664 ${y} 792 ${y}`,
+        side: s.side,
+        dur: 3.8 + (i % 3) * 0.6,
+      })
+    })
+    // 通道内的直线光子带: 只在两条 100px 空档里水平跳跃, 方向最直观
+    ;[0, 1, 2].forEach(r => {
+      const y = 152 + r * 158
+      out.push({
+        id: `bus-a-${r}`,
+        d: `M 240 ${y} L 322 ${y}`,
+        side: r % 2 === 0 ? 'buy' : 'sell',
+        dur: 1.6,
+        bus: true,
+      })
+      out.push({
+        id: `bus-b-${r}`,
+        d: `M 678 ${y} L 760 ${y}`,
+        side: r % 2 === 0 ? 'buy' : 'sell',
+        dur: 1.6,
+        bus: true,
+      })
+    })
+    return out
+  }, [symbols, strategies])
+
+  const pct = account
+    ? (account.estimating ? (account.live_pnl_pct ?? account.pnl_pct ?? 0) : (account.pnl_pct ?? 0))
+    : 0
+  const total = account
+    ? (account.estimating ? (account.live_total ?? account.total) : account.total)
+    : 0
+  // 纵向无缝滚动: 少量标的时复制一份
+  const symbolRail = symbols.length > 4 ? [...symbols, ...symbols] : symbols
+  const activeAccounts = totals?.active_accounts ?? new Set(orders.map(o => o.account)).size
+  const buyCount = totals?.buys ?? orders.filter(o => o.side === 'buy').length
+  const sellCount = totals?.sells ?? orders.length - orders.filter(o => o.side === 'buy').length
+  const orderTotal = totals?.orders ?? orders.length
+  const latestNav = account?.nav?.at(-1)?.nav ?? null
+  // 现金/市值构成条 (真实账户口径)
+  const cashPct = account && total > 0 ? Math.max(0, Math.min(100, (account.cash / total) * 100)) : 0
+  const tapeItems = orders.slice(0, 14)
+
+  return (
+    <section className="tf-capital" aria-label="资金全景">
+      <span className="tf-capital-grid" aria-hidden="true" />
+      <header className="tf-capital-head">
+        <span className="tf-live-dot" aria-hidden="true" />
+        <span className="font-mono text-[10px] tracking-[0.24em] text-muted">CAPITAL PANORAMA</span>
+        <span className="tf-cockpit-sub">行情 → 策略 → 账户 · 实时资本流向</span>
+        <span className="tf-cockpit-live ml-auto">
+          {accounts.length} ACCOUNTS · {symbols.length} SYMBOLS · {orders.length} FILLS · {strategies.filter(s => s.enabled).length}/{strategies.length} STRATEGIES
+        </span>
+      </header>
+
+      <div className="tf-capital-stage">
+        <svg className="tf-capital-flow" viewBox="0 0 1000 620" preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <marker
+              id="tf-flow-arrow"
+              viewBox="0 0 6 6"
+              refX="5"
+              refY="3"
+              markerWidth="6"
+              markerHeight="6"
+              orient="auto"
+            >
+              <path d="M0,0 L6,3 L0,6 Z" />
+            </marker>
+            <marker
+              id="tf-flow-arrow-lg"
+              viewBox="0 0 6 6"
+              refX="5"
+              refY="3"
+              markerWidth="13"
+              markerHeight="13"
+              orient="auto"
+            >
+              <path d="M0,0 L6,3 L0,6 Z" />
+            </marker>
+          </defs>
+          {flows.map((f, i) => (
+            <g key={f.id}>
+              <path
+                d={f.d}
+                className={cn('tf-flow-lane', f.bus && 'is-bus')}
+                markerEnd={f.bus ? 'url(#tf-flow-arrow-lg)' : 'url(#tf-flow-arrow)'}
+              />
+              {(f.bus ? [0, 1] : [0, 1, 2, 3]).map(k => (
+                <g key={k} className={cn('tf-photon', f.side === 'buy' ? 'is-buy' : 'is-sell', f.bus && 'is-bus')}>
+                  <animateMotion
+                    dur={`${f.dur}s`}
+                    repeatCount="indefinite"
+                    path={f.d}
+                    begin={`${((k * f.dur) / 4 + (i % 5) * 0.23).toFixed(2)}s`}
+                    calcMode="discrete"
+                    keyPoints="0;0.14;0.28;0.42;0.56;0.7;0.84;1"
+                    keyTimes="0;0.13;0.26;0.39;0.52;0.65;0.78;0.91"
+                  />
+                  <circle r={f.bus ? 9 : 7.5} className="tf-photon-halo" />
+                  <circle r={f.bus ? 3.2 : 2.6} className="tf-photon-core" />
+                </g>
+              ))}
+            </g>
+          ))}
+        </svg>
+
+        <div className="tf-capital-col is-left">
+          <div className="tf-col-head">
+            <span>MARKET UNIVERSE</span>
+            <b>{symbols.length}</b>
+          </div>
+          <div className="tf-symbol-sub">
+            <span>标的</span>
+            <span>现价</span>
+            <span>涨跌</span>
+          </div>
+          {symbols.length === 0 ? (
+            <div className="tf-col-empty">
+              <span className="tf-live-wave" aria-hidden="true"><i /><i /><i /><i /><i /></span>
+              <span>等待成交回报…</span>
+            </div>
+          ) : (
+            <div className="tf-symbol-rail">
+              <div className="tf-symbol-track">
+                {symbolRail.map((s, i) => (
+                  <div
+                    key={`${s.symbol}-${i}`}
+                    className={cn('tf-symbol-row', s.side === 'buy' ? 'is-buy' : 'is-sell')}
+                    title={`${s.name || s.symbol} · ${s.symbol} · ${s.count} 笔`}
+                  >
+                    <span className="tf-symbol-main">
+                      <span className="tf-symbol-name">{s.name || s.symbol}</span>
+                      <span className="tf-symbol-code">{s.symbol}{s.count > 1 ? ` · ${s.count}笔` : ''}</span>
+                    </span>
+                    <span className="tf-symbol-quote">
+                      <b className="tf-symbol-price">{s.price != null ? fmtMoney(s.price, 2) : '—'}</b>
+                      <span className={cn('tf-symbol-pct', s.changePct != null ? priceColorClass(s.changePct / 100) : 'text-muted')}>
+                        {s.changePct != null ? fmtPct(s.changePct / 100) : '—'}
+                      </span>
+                    </span>
+                    <span className="tf-symbol-side">{s.side === 'buy' ? 'B' : 'S'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="tf-signal-gutter is-a" aria-hidden="true">
+          <span className="tf-gutter-tag">SIG</span>
+          {[0, 1, 2, 3, 4, 5].map(r => (
+            <span key={r} className="tf-gutter-chev">
+              <i>›</i><i>›</i><i>›</i>
+            </span>
+          ))}
+        </div>
+
+        <div className="tf-capital-col is-core">
+          <span className="tf-core-halo" aria-hidden="true" />
+          <div className="tf-core-head">
+            <span className="tf-core-orb" aria-hidden="true" />
+            <div className="min-w-0">
+              <div className="tf-col-head"><span>STRATEGY LIBRARY</span></div>
+              <div className="text-[9px] text-muted">
+                {strategies.length > 0
+                  ? `${strategies.filter(s => s.enabled).length} 启用 / ${strategies.length} 策略`
+                  : '策略库同步中'}
+              </div>
+            </div>
+          </div>
+          <div className="tf-strategy-grid">
+            {strategies.map(s => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => onSelectAccount(s.account)}
+                title={`${s.name} · ${s.accountName} · ${s.enabled ? '已启用' : '已停用'}`}
+                className={cn('tf-strategy-item', !s.enabled && 'is-off', s.account === account?.account && 'is-active')}
+              >
+                <span className={cn('tf-strategy-led', s.side === 'buy' ? 'is-buy' : 'is-sell')} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-1">
+                    <span className="truncate text-[12px]">{s.name}</span>
+                    <span className={cn('tf-strategy-tag', !s.enabled && 'is-off')}>
+                      {s.kind === 'strategy' ? 'STRAT' : 'RULE'}
+                    </span>
+                  </span>
+                  <span className="block truncate font-mono text-[9px] text-muted">{s.accountName}</span>
+                </span>
+                <span className={cn('font-mono text-[9px]', s.enabled ? 'text-accent' : 'text-muted')}>
+                  {s.enabled ? 'ON' : 'OFF'}
+                </span>
+              </button>
+            ))}
+            {strategies.length === 0 && <div className="tf-col-empty">策略库同步中…</div>}
+          </div>
+          <div className="tf-core-metrics">
+            <div><span>委托流水</span><b>{orderTotal}</b></div>
+            <div><span>买 / 卖</span><b>{buyCount}/{sellCount}</b></div>
+            <div><span>活跃账户</span><b>{activeAccounts}</b></div>
+          </div>
+        </div>
+
+        <div className="tf-signal-gutter is-b" aria-hidden="true">
+          <span className="tf-gutter-tag">OUT</span>
+          {[0, 1, 2, 3, 4, 5].map(r => (
+            <span key={r} className="tf-gutter-chev is-tall">
+              <i>›</i><i>›</i><i>›</i>
+            </span>
+          ))}
+        </div>
+
+        <div className="tf-capital-col is-right">
+          {account ? (
+            <div key={account.account} className="tf-account-card">
+              <span className="tf-account-watermark" aria-hidden="true">{String(idx + 1).padStart(2, '0')}</span>
+              <span
+                key={`p-${account.account}-${idx}`}
+                className="tf-account-progress"
+                aria-hidden="true"
+              />
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="tf-account-name truncate">{account.name}</span>
+                    <span className="tf-account-idx">{idx + 1}/{count}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-1.5 font-mono text-[9px] text-muted">
+                    <span className="truncate">{account.account}</span>
+                    <span className="tf-account-badge">AUTO 5s</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onOpenTerminal(account)}
+                  className="rounded-btn border border-accent/40 px-2 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent/10"
+                >
+                  执行终端 ↗
+                </button>
+              </div>
+              <div className="mt-3">
+                <div className="text-[9px] tracking-[0.16em] text-muted">TOTAL ASSET</div>
+                <div className="flex items-baseline gap-2">
+                  <AnimatedNumber
+                    value={total}
+                    format={v => fmtMoney(v, 0)}
+                    resetKey={account.last_nav_date ?? account.account}
+                    className="font-mono text-[34px] font-semibold leading-none tabular tracking-tight"
+                  />
+                  <span className={cn('font-mono text-sm tabular', priceColorClass(pct / 100))}>
+                    {fmtPct(pct / 100)}
+                  </span>
+                </div>
+                <div className="mt-1.5 flex items-center gap-3 font-mono text-[9px] text-muted">
+                  <span>
+                    今日{' '}
+                    <b className={cn('tabular', account.day_change_pct != null ? priceColorClass(account.day_change_pct / 100) : '')}>
+                      {account.day_change_pct != null ? fmtPct(account.day_change_pct / 100) : '—'}
+                    </b>
+                  </span>
+                  <span>净值 <b className="tabular text-secondary">{latestNav != null ? fmtMoney(latestNav, 3) : '—'}</b></span>
+                  <span>初始 <b className="tabular text-secondary">{fmtMoney(account.initial_cash, 0)}</b></span>
+                </div>
+                <div className="tf-account-compose">
+                  <div className="tf-compose-bar">
+                    <i style={{ width: `${cashPct}%` }} />
+                    <b style={{ width: `${100 - cashPct}%` }} />
+                  </div>
+                  <div className="tf-compose-legend">
+                    <span>现金 {fmtMoney(account.cash, 0)}</span>
+                    <span>市值 {fmtMoney(account.market_value, 0)}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="tf-account-stats">
+                {[
+                  ['持仓', String(account.holdings_count ?? 0)],
+                  ['回合', String(account.rounds)],
+                  ['胜率', `${account.win_rate.toFixed(1)}%`],
+                  ['回撤', account.max_drawdown != null ? `-${account.max_drawdown.toFixed(1)}%` : '—'],
+                  ['已实现', account.realized_pnl != null ? fmtMoney(account.realized_pnl, 0) : '—'],
+                  ['盈亏比', account.profit_loss_ratio != null ? account.profit_loss_ratio.toFixed(2) : '—'],
+                  ['市值', fmtMoney(account.market_value, 0)],
+                  ['费率', `${(account.fees.commission_pct * 10000).toFixed(1)}bp`],
+                ].map(([k, v]) => (
+                  <div key={k}>
+                    <div className="tf-stat-k">{k}</div>
+                    <div className="tf-stat-v">{v}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="tf-col-head mt-2.5"><span>RECENT ORDERS</span><b>{accountOrders.length}</b></div>
+              <div className={cn('tf-account-orders', accountOrders.length === 0 && 'is-empty')}>
+                {accountOrders.length === 0 && (
+                  <div className="tf-orders-idle">
+                    <span className="tf-live-wave" aria-hidden="true"><i /><i /><i /><i /><i /></span>
+                    <span>该账户暂无成交 · 轮播继续</span>
+                  </div>
+                )}
+                {accountOrders.slice(0, 8).map(o => (
+                  <div
+                    key={o.id}
+                    className={cn('tf-order-row', o.side === 'buy' ? 'is-buy' : 'is-sell')}
+                  >
+                    <span className="w-11 shrink-0 font-mono text-[9px] text-muted">{fmtFeedTime(o.created_at)}</span>
+                    <span className="w-16 shrink-0 font-mono text-[9px]">{o.symbol}</span>
+                    <b className={cn('w-7 shrink-0 font-mono text-[9px]', o.side === 'buy' ? 'text-bull' : 'text-bear')}>
+                      {o.side === 'buy' ? 'BUY' : 'SELL'}
+                    </b>
+                    <span className="font-mono text-[9px] text-muted">×{o.qty}</span>
+                    <span className="ml-auto font-mono text-[9px] text-secondary">
+                      {o.fill_price != null ? fmtMoney(o.fill_price, 2) : '—'}
+                    </span>
+                    <span className={cn('tf-feed-state shrink-0', `is-${o.status}`)}>
+                      {LIVE_STATUS_LABEL[o.status] ?? o.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="tf-account-pager">
+                {rotation.map((a, i) => (
+                  <button
+                    key={a.account}
+                    type="button"
+                    onClick={() => setIdx(i)}
+                    aria-label={a.name}
+                    className={cn('tf-pager-dot', i === idx && 'is-active')}
+                  />
+                ))}
+                <span className="ml-auto text-[9px] text-muted">5s 轮播</span>
+              </div>
+            </div>
+          ) : (
+            <div className="tf-col-empty">暂无模拟账户</div>
+          )}
+        </div>
+      </div>
+
+      {tapeItems.length > 0 && (
+        <div className="tf-capital-tape" aria-hidden="true">
+          <span className="tf-tape-tag">LIVE FILLS</span>
+          <div className="tf-tape-rail">
+            <div className="tf-tape-track">
+              {[...tapeItems, ...tapeItems].map((o, i) => (
+                <span key={`${o.id}-${i}`} className={cn('tf-tape-item', o.side === 'buy' ? 'is-buy' : 'is-sell')}>
+                  <b>{o.side === 'buy' ? 'BUY' : 'SELL'}</b>
+                  <span className="tf-tape-sym">{o.symbol}</span>
+                  <span className="tf-tape-qty">×{o.qty}</span>
+                  <span className="tf-tape-px">@{o.fill_price != null ? fmtMoney(o.fill_price, 2) : '—'}</span>
+                  <span className="tf-tape-acc">{o.name}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+/** 策略引擎控制台: 引擎状态 + 管道阶段 + 实时订单流。
+ *  全部数据来自真实跟单状态/订单/成交, 无数据时退化为雷达待机态。 */
+function PaperLiveConsole({ account, ov, orders, fills, symbolNames }: {
+  account: string
+  ov: {
+    total?: number
+    total_pnl?: number
+    initial_cash?: number
+    price_date?: string | null
+    holdings?: PaperHolding[]
+  }
+  orders: PaperOrder[]
+  fills: PaperFill[]
+  symbolNames: Record<string, string>
+}) {
+  const bindingQ = useQuery({
+    queryKey: executionKey(account),
+    queryFn: () => executionApi.state(account),
+    refetchInterval: 15_000,
+    retry: false,
+  })
+  const binding: ExecutionBinding | null = bindingQ.data?.binding ?? null
+  // 逐笔行情通道: 订阅当前持仓, 每拍闪烁最新价 (休市时退回账户快照价)
+  const holdings = (ov.holdings ?? []).slice(0, 6)
+  const ticks = useSymbolTicks(holdings.map(h => h.symbol), holdings.length > 0)
+  const tickCount = Object.keys(ticks).length
+  const day = ov.price_date || paperTradingDay()
+  const todays = orders.filter(o => (o.created_at ?? '').startsWith(day))
+  const todayFills = fills.filter(f => f.date === day && f.kind !== 'corp_action')
+  const pending = orders.filter(o => o.status === 'pending')
+  const recent = orders.slice(0, 6)
+  const lastFill = todayFills[todayFills.length - 1]
+
+  const state = !binding
+    ? 'idle'
+    : binding.enabled
+      ? binding.status === 'blocked' ? 'blocked' : 'running'
+      : 'paused'
+  const live = state === 'running'
+  const stages = [
+    { key: 'signal', label: '信号', active: state === 'running', value: binding?.last_bar || '—' },
+    { key: 'risk', label: '风控', active: state === 'running' && !binding?.risk_message, value: binding?.risk_message ? '拦截' : '通过' },
+    { key: 'order', label: '委托', active: pending.length > 0, value: String(pending.length) },
+    { key: 'fill', label: '成交', active: todayFills.length > 0, value: String(todayFills.length) },
+  ]
+
+  return (
+    <section className="tf-panel tf-engine-console rounded-card border border-border bg-surface p-4" aria-label="策略引擎实时执行">
+      <span className="tf-engine-scan" aria-hidden="true" />
+      <div className="relative flex flex-wrap items-start gap-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cn('tf-live-dot', !live && 'is-idle')} aria-hidden="true" />
+            <span className="font-mono text-[10px] tracking-[0.22em] text-muted">STRATEGY ENGINE</span>
+            <span className={cn('tf-engine-state', `is-${state}`)}>{ENGINE_STATE_LABEL[state]}</span>
+            <span className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-muted">
+              <Cpu className="h-3 w-3" />
+              交易日 {day}
+            </span>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="truncate text-sm font-medium">
+              {binding ? binding.snapshot.name : '未接入策略快照'}
+            </span>
+            {binding?.last_bar && (
+              <span className="font-mono text-[10px] text-muted">最近信号日 {binding.last_bar}</span>
+            )}
+            {bindingQ.isError && <span className="text-[10px] text-warning">跟单状态读取失败</span>}
+          </div>
+          <PulseLine live={live} className="mt-2 h-5 w-full max-w-[220px]" />
+          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+            {stages.map((s, i) => (
+              <Fragment key={s.key}>
+                {i > 0 && <span className="tf-engine-arrow" aria-hidden="true">›</span>}
+                <span
+                  className={cn('tf-engine-stage', s.active && 'is-active')}
+                  title={`${s.label}: ${s.value}`}
+                >
+                  <span className="tf-engine-stage-label">{s.label}</span>
+                  <b className="font-mono">{s.value}</b>
+                </span>
+              </Fragment>
+            ))}
+          </div>
+        </div>
+        <div className="grid w-full grid-cols-3 gap-2 sm:w-auto sm:min-w-[268px]">
+          {[
+            { label: '本日委托', value: todays.length, cls: '' },
+            { label: '待成交', value: pending.length, cls: pending.length > 0 ? 'text-accent' : '' },
+            { label: '本日成交', value: todayFills.length, cls: todayFills.length > 0 ? 'text-bull' : '' },
+          ].map(m => (
+            <div key={m.label} className="tf-engine-metric rounded-btn border border-border/70 px-2.5 py-1.5">
+              <div className="text-[9px] tracking-[0.14em] text-muted">{m.label}</div>
+              <AnimatedNumber
+                value={m.value}
+                resetKey={day}
+                className={cn('font-mono text-lg font-semibold tabular', m.cls)}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="relative mt-3 border-t border-border/60 pt-2.5">
+        {holdings.length > 0 && (
+          <div className="tf-tick-strip mb-2.5">
+            <span className="inline-flex shrink-0 items-center gap-1.5 font-mono text-[9px] tracking-[0.16em] text-muted">
+              {tickCount > 0 && <span className="tf-live-dot" aria-hidden="true" />}
+              TICKS
+            </span>
+            {holdings.map(h => {
+              const t = ticks[h.symbol]
+              const price = t?.last_price ?? h.last_price
+              const pct = t?.change_pct
+              return (
+                <span key={h.symbol} className="tf-tick-cell">
+                  <span className="font-mono text-[10px] text-muted">{h.symbol}</span>
+                  <span
+                    key={`${h.symbol}-${t?.ts ?? 0}`}
+                    className={cn(
+                      'tf-tick-price',
+                      t?.dir === 'up' && 'is-up',
+                      t?.dir === 'down' && 'is-down',
+                    )}
+                  >
+                    {fmtMoney(price, 2)}
+                  </span>
+                  <span className={cn('font-mono text-[10px] tabular', pct != null ? priceColorClass(pct / 100) : 'text-muted')}>
+                    {pct != null ? fmtPct(pct / 100) : '—'}
+                  </span>
+                </span>
+              )
+            })}
+            <span className="ml-auto shrink-0 text-[9px] text-muted">
+              {tickCount > 0 ? '逐笔推送' : '快照'}
+            </span>
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <Activity className="h-3.5 w-3.5 text-accent" />
+          <span className="text-xs font-medium">实时订单流</span>
+          <span className="font-mono text-[10px] text-muted">{orders.length} 笔</span>
+          {pending.length > 0 && (
+            <span className="tf-engine-live-tag">撮合中 {pending.length}</span>
+          )}
+          {lastFill?.symbol && (
+            <span key={lastFill.seq} className="tf-engine-tick ml-auto font-mono text-[10px]">
+              最近成交 {lastFill.symbol}
+              <span className={lastFill.side === 'buy' ? 'text-bull' : 'text-bear'}>
+                {lastFill.side === 'buy' ? ' 买入' : ' 卖出'}
+              </span>
+              {lastFill.price != null ? ` @ ${fmtMoney(lastFill.price, 3)}` : ''}
+            </span>
+          )}
+        </div>
+        {recent.length === 0 ? (
+          <div className="tf-engine-idle">
+            <span className="tf-radar" aria-hidden="true" />
+            <div>
+              <div className="text-[11px] text-secondary">等待策略信号</div>
+              <div className="text-[10px] text-muted">
+                {binding ? '已接入策略, 买卖点触发后自动在此流转' : '绑定回测参数快照后, 自动跟单委托会在此实时流转'}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-2 space-y-1">
+            {recent.map((o, i) => (
+              <div
+                key={o.id}
+                style={{ animationDelay: `${Math.min(i, 5) * 40}ms` }}
+                className={cn('tf-flow-row', o.side === 'buy' ? 'is-buy' : 'is-sell', o.status === 'pending' && 'is-pending')}
+              >
+                <span className={cn('w-9 shrink-0 font-mono text-[10px] font-semibold', o.side === 'buy' ? 'text-bull' : 'text-bear')}>
+                  {o.side === 'buy' ? 'BUY' : 'SELL'}
+                </span>
+                <span className="w-20 shrink-0 font-mono">{o.symbol}</span>
+                <span className="min-w-0 flex-1 truncate text-[11px] text-muted">{symbolNames[o.symbol] ?? ''}</span>
+                <span className="shrink-0 font-mono text-muted">{o.qty}</span>
+                <span className="w-24 shrink-0 text-right font-mono text-[11px] text-muted">
+                  {o.fill_price != null ? `@${fmtMoney(o.fill_price, 3)}` : ORDER_TYPE_LABEL[o.order_type]}
+                </span>
+                <span className={cn(
+                  'w-14 shrink-0 rounded-full py-px text-center text-[10px] leading-4',
+                  o.status === 'filled' ? 'bg-bull/10 text-bull'
+                    : o.status === 'pending' ? 'bg-accent/10 text-accent'
+                    : o.status === 'expired' ? 'bg-warning/10 text-warning'
+                    : 'bg-elevated text-muted',
+                )}>
+                  {STATUS_LABEL[o.status]}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 /** 账户操作面板 (原单账户视图主体): 在对比榜单行展开内渲染, 免跳转。
  *  含总览卡/净值曲线/持仓/订单与成交/回合明细/下单/跟单规则/费用设置/冻结/删除。 */
 function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; onDeleted?: () => void }) {
@@ -2119,6 +3061,7 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
   const [tab, setTab] = useState<'orders' | 'trades' | 'rounds'>('orders')
   const [feeOpen, setFeeOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [replaySymbol, setReplaySymbol] = useState<string | null>(null)
   const [showAllOrders, setShowAllOrders] = useState(false)
   const [showAllTrades, setShowAllTrades] = useState(false)
 
@@ -2232,10 +3175,10 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
         <button
           onClick={() => setFeeOpen(true)}
           className="ml-auto flex items-center gap-1 rounded-btn border border-border px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent"
-          title={`佣金 ${((ov.fees?.commission_pct ?? 0) * 10000).toFixed(1)}‱ (最低5元) · 印花税 ${((ov.fees?.stamp_tax_pct ?? 0) * 1000).toFixed(1)}‰ 仅卖出 · 滑点 ${ov.fees?.slippage_bps ?? 0}bps — 点击调整`}
+          title={`佣金 ${((ov.fees?.commission_pct ?? 0) * 10000).toFixed(1)}‱ (最低5元) · 印花税 ${((ov.fees?.stamp_tax_pct ?? 0) * 1000).toFixed(1)}‰ ${ov.market === 'hk' ? '双边' : ov.market === 'us' ? '无印花税' : '仅卖出'} · 滑点 ${ov.fees?.slippage_bps ?? 0}bps — 点击调整`}
         >
           <Settings className="h-3 w-3" />
-          佣金 {((ov.fees?.commission_pct ?? 0) * 10000).toFixed(1)}‱ · 印花税 {((ov.fees?.stamp_tax_pct ?? 0) * 1000).toFixed(1)}‰ · 滑点 {ov.fees?.slippage_bps ?? 0}bps
+          佣金 {((ov.fees?.commission_pct ?? 0) * 10000).toFixed(1)}‱ · 印花税 {((ov.fees?.stamp_tax_pct ?? 0) * 1000).toFixed(1)}‰{ov.market === 'hk' ? '双边' : ''} · 滑点 {ov.fees?.slippage_bps ?? 0}bps
         </button>
         <button
           onClick={() => api.paperFreeze(ov.status !== 'frozen', acc).then(invalidateAll)}
@@ -2254,27 +3197,37 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
       <div>
         {/* 总览卡片 */}
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <StatCard label="总资产 (虚拟)" value={fmtMoney(ov.total)} icon={Wallet} iconCls="text-accent" />
-          <StatCard label="现金" value={fmtMoney(ov.cash)} icon={Banknote} iconCls="text-muted" />
-          <StatCard label="持仓市值" value={fmtMoney(ov.market_value)} icon={PieChart} iconCls="text-muted" />
+          <StatCard label="总资产 (虚拟)" numeric={ov.total} numFormat={v => fmtMoney(v)} sub={ov.price_date ? `估值日 ${ov.price_date}` : '盘中快照实时估算'} icon={Wallet} iconCls="text-accent" />
+          <StatCard label="现金" numeric={ov.cash} numFormat={v => fmtMoney(v)} icon={Banknote} iconCls="text-muted" />
+          <StatCard label="持仓市值" numeric={ov.market_value} numFormat={v => fmtMoney(v)} icon={PieChart} iconCls="text-muted" />
           <StatCard
             label="累计盈亏"
-            value={`${(ov.total_pnl ?? 0) >= 0 ? '+' : ''}${fmtMoney(ov.total_pnl)} (${fmtPct(pnlPct / 100)})`}
+            numeric={ov.total_pnl} numFormat={v => `${v >= 0 ? '+' : ''}${fmtMoney(v)} (${fmtPct(pnlPct / 100)})`}
             valueClass={priceColorClass((ov.total_pnl ?? 0) / (ov.initial_cash || 1))}
             icon={TrendingUp}
             iconCls={priceColorClass((ov.total_pnl ?? 0) / (ov.initial_cash || 1))}
           />
         </div>
 
+        <div className="mt-4">
+          <PaperLiveConsole
+            account={acc}
+            ov={ov}
+            orders={allOrders}
+            fills={allFills}
+            symbolNames={symbolNames}
+          />
+        </div>
+
         <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1fr_320px]">
           {/* 左列: 净值 + 持仓 + 流水 */}
           <div className="min-w-0 space-y-4">
-            <div className="rounded-card border border-border bg-surface p-4">
+            <div className="tf-panel rounded-card border border-border bg-surface p-4">
               <div className="text-sm font-medium">净值曲线 <span className="ml-1 text-[10px] text-muted">按交易日收盘定版</span></div>
-              {nav.length > 0 ? <NavChart nav={nav} /> : <div className="py-10 text-center text-xs text-muted">暂无定版净值 — 交易日盘后管道自动结算</div>}
+              {nav.length > 0 ? <NavChart nav={nav} market={ov.market ?? 'cn'} /> : <div className="py-10 text-center text-xs text-muted">暂无定版净值 — 交易日盘后管道自动结算</div>}
             </div>
 
-            <div className="rounded-card border border-border bg-surface p-4">
+            <div className="tf-panel rounded-card border border-border bg-surface p-4">
               <div className="text-sm font-medium">当前持仓</div>
               {holdings.length === 0 ? (
                 <div className="py-8 text-center text-xs text-muted">暂无持仓 — 右侧下单或等自动跟单触发</div>
@@ -2289,6 +3242,7 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
                       <th className="py-1.5 text-right font-normal">现价</th>
                       <th className="py-1.5 text-right font-normal">市值</th>
                       <th className="py-1.5 text-right font-normal">盈亏</th>
+                      <th className="py-1.5 text-right font-normal">回放</th>
                     </tr>
                   </thead>
                   <tbody className="font-mono">
@@ -2308,6 +3262,15 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
                         <td className={cn('py-1.5 text-right', priceColorClass(h.pnl))}>
                           {(h.pnl >= 0 ? '+' : '') + fmtMoney(h.pnl, 0)} ({fmtPct(h.pnl_pct / 100)})
                         </td>
+                        <td className="py-1.5 text-right">
+                          <button
+                            onClick={() => setReplaySymbol(h.symbol)}
+                            className="rounded-btn border border-border px-1.5 py-0.5 font-sans text-[10px] text-muted transition-colors hover:border-accent/40 hover:text-accent"
+                            title="在日K上回放该标的的买卖点"
+                          >
+                            回放
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -2316,7 +3279,7 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
             </div>
 
             {/* 订单 / 成交 / 回合明细 */}
-            <div className="rounded-card border border-border bg-surface p-4">
+            <div className="tf-panel rounded-card border border-border bg-surface p-4">
               <div className="flex flex-wrap items-center gap-2">
                 {(['orders', 'trades', 'rounds'] as const).map(t => (
                   <button
@@ -2424,6 +3387,13 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
                           <span className="w-16 shrink-0 text-right">{f.qty}</span>
                           <span className="w-20 shrink-0 text-right">@ {fmtMoney(f.price, 3)}</span>
                           <span className="w-16 shrink-0 text-right text-muted">费 {fmtMoney(f.fee)}</span>
+                          <button
+                            onClick={() => setReplaySymbol(f.symbol)}
+                            className="ml-auto shrink-0 rounded-btn border border-border px-1.5 py-0.5 font-sans text-[10px] text-muted transition-colors hover:border-accent/40 hover:text-accent"
+                            title="在日K上回放该标的的买卖点"
+                          >
+                            回放
+                          </button>
                         </>
                       )}
                     </div>
@@ -2496,7 +3466,7 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
               <div className="font-medium text-secondary">撮合口径</div>
               <div className="mt-1">· 即时单: 交易时段按最新快照价 + 滑点成交</div>
               <div>· 次日开盘 / 当日收盘单: 盘后管道按真实开盘/收盘价成交</div>
-              <div>· T+1: 当日买入次一交易日可卖</div>
+              <div>· {ov.market === 'cn' ? 'T+1: 当日买入次一交易日可卖' : 'T+0: 当日买入即可卖出'}</div>
               <div>· 停牌顺延 3 日自动过期; 除权按因子调整数量与成本, 台账留痕</div>
               <div className="mt-2 flex items-center justify-between border-t border-border/40 pt-2">
                 <span title="开启后, 触及涨停的买入/触及跌停的卖出不再直接过期, 转次日开盘重试 (最多顺延 3 日)">
@@ -2542,6 +3512,9 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
             onDeleted?.()
           }}
         />
+      )}
+      {replaySymbol && (
+        <PaperReplayModal acc={acc} symbol={replaySymbol} onClose={() => setReplaySymbol(null)} />
       )}
     </div>
   )

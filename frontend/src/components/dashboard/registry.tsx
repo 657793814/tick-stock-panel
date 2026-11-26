@@ -9,7 +9,8 @@ import type { ReactNode } from 'react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowUpRight, BarChart3, BellRing, Flame, Gauge, LineChart, Link2, Sparkles, Target, TrendingUp, TrendingDown, Coins, Repeat } from 'lucide-react'
-import type { AlertEvent, OverviewMarket } from '@/lib/api'
+import type { AlertEvent, IndexQuote, OverviewMarket } from '@/lib/api'
+import { marketLabel, type Market } from '@/lib/market'
 import { fmtBigNum } from '@/lib/format'
 import type { DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { SealedBadge } from '@/components/SealedBadge'
@@ -21,10 +22,15 @@ import {
 } from './widgets'
 import type { DashboardItem, WidgetType } from './layout'
 import { ExternalLinkWidget } from './ExternalLinkWidget'
+import { AnimatedNumber, fmtInt } from '@/components/motion/AnimatedNumber'
 
 /** 渲染上下文: 数据切片与交互回调(由 Dashboard 页提供, 组件不自取数据) */
 export interface WidgetCtx {
   data: OverviewMarket
+  market: Market
+  /** 港美股指数由市场指数接口单独提供（overview.indices 仅 A 股） */
+  marketIndices?: IndexQuote[]
+  marketIndicesLoading?: boolean
   score: number
   hasDepth: boolean
   sealedReady: boolean
@@ -45,6 +51,8 @@ export interface WidgetDef {
   /** 默认尺寸(添加新实例时), 布局默认坐标在 DEFAULT_LAYOUT */
   defW: number
   defH: number
+  /** 可用市场; 缺省为三市场通用。A 股专属模块在港美股不渲染，避免空榜/伪数据。 */
+  markets?: readonly Market[]
   render: (ctx: WidgetCtx, item: DashboardItem) => ReactNode
 }
 
@@ -52,7 +60,7 @@ function sectionCard(children: ReactNode, opts: { className?: string; style?: CS
   return (
     <section
       style={opts.style}
-      className={`h-full overflow-hidden rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)] ${opts.className ?? ''}`}
+      className={`tf-widget h-full overflow-hidden rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)] ${opts.className ?? ''}`}
     >
       {children}
     </section>
@@ -87,10 +95,22 @@ function KpiWidget({ ctx }: { ctx: WidgetCtx }) {
   const { data, hasDepth, isSealedDegrade, sealedReady } = ctx
   const strongUp = data.breadth.strong_up ?? 0
   const strongDown = data.breadth.strong_down ?? 0
+  if (ctx.market !== 'cn') {
+    return (
+      <div className="grid h-full grid-cols-3 gap-1 xl:grid-cols-6">
+        <KpiCell label="个股涨 / 平 / 跌" value={<><span className="text-bull"><AnimatedNumber value={data.breadth.up} format={fmtInt} resetKey={ctx.market} /></span><span className="text-muted">/</span><span className="text-muted"><AnimatedNumber value={data.breadth.flat} format={fmtInt} resetKey={ctx.market} /></span><span className="text-muted">/</span><span className="text-bear"><AnimatedNumber value={data.breadth.down} format={fmtInt} resetKey={ctx.market} /></span></>} sub={`上涨率 ${data.breadth.up_pct.toFixed(1)}%`} />
+        <KpiCell label="强势 / 弱势" value={<><span className="text-bull"><AnimatedNumber value={strongUp} format={fmtInt} resetKey={ctx.market} /></span><span className="text-muted">/</span><span className="text-bear"><AnimatedNumber value={strongDown} format={fmtInt} resetKey={ctx.market} /></span></>} sub="涨跌 ≥3%" />
+        <KpiCell label="60日新高 / 新低" value={<><span className="text-bull">{data.trend.new_high}</span><span className="text-muted">/</span><span className="text-bear">{data.trend.new_low}</span></>} sub="替代涨跌停口径" />
+        <KpiCell label="站上MA20 / MA60" value={`${data.trend.above_ma20_pct.toFixed(0)}% / ${data.trend.above_ma60_pct.toFixed(0)}%`} sub="趋势强度" />
+        <KpiCell label="量比" value={fmtPrice(data.activity.vol_ratio, 2)} sub="全市场中位数" tone="accent" />
+        <KpiCell label="放量占比" value={`${fmtPrice(data.activity.high_vol_ratio, 1)}%`} sub={`量比 > 1.5 的 ${data.activity.high_vol_ratio > 0 ? '标的' : '—'}`} />
+      </div>
+    )
+  }
   return (
     <div className="grid h-full grid-cols-3 gap-1 xl:grid-cols-6">
-      <KpiCell label="个股涨 / 平 / 跌" value={<><span className="text-bull">{data.breadth.up}</span><span className="text-muted">/</span><span className="text-muted">{data.breadth.flat}</span><span className="text-muted">/</span><span className="text-bear">{data.breadth.down}</span></>} sub={`上涨率 ${data.breadth.up_pct.toFixed(1)}%`} />
-      <KpiCell label="强势 / 弱势" value={<><span className="text-bull">{strongUp}</span><span className="text-muted">/</span><span className="text-bear">{strongDown}</span></>} sub="涨跌 ≥3%" />
+      <KpiCell label="个股涨 / 平 / 跌" value={<><span className="text-bull"><AnimatedNumber value={data.breadth.up} format={fmtInt} resetKey={ctx.market} /></span><span className="text-muted">/</span><span className="text-muted"><AnimatedNumber value={data.breadth.flat} format={fmtInt} resetKey={ctx.market} /></span><span className="text-muted">/</span><span className="text-bear"><AnimatedNumber value={data.breadth.down} format={fmtInt} resetKey={ctx.market} /></span></>} sub={`上涨率 ${data.breadth.up_pct.toFixed(1)}%`} />
+      <KpiCell label="强势 / 弱势" value={<><span className="text-bull"><AnimatedNumber value={strongUp} format={fmtInt} resetKey={ctx.market} /></span><span className="text-muted">/</span><span className="text-bear"><AnimatedNumber value={strongDown} format={fmtInt} resetKey={ctx.market} /></span></>} sub="涨跌 ≥3%" />
       <KpiCell label={<span className="inline-flex items-center gap-1">涨停 / 跌停<SealedBadge degraded={isSealedDegrade} hasDepth={hasDepth} isHistorical={false} sealedReady={sealedReady} sealedCountsUp={{ real: data.limit.limit_up, fake: data.limit.fake_up ?? 0, pending: 0 }} sealedCountsDown={{ real: data.limit.limit_down, fake: data.limit.fake_down ?? 0, pending: 0 }} rawUp={data.limit.limit_up + (data.limit.fake_up ?? 0)} rawDown={data.limit.limit_down + (data.limit.fake_down ?? 0)} invalidateKeys={['overview-market', 'limit-ladder']} /></span>} value={<><span className="text-bull">{data.limit.limit_up}</span><span className="text-muted">/</span><span className="text-bear">{data.limit.limit_down}</span></>} sub={`封板率 ${(data.limit.seal_rate ?? 0).toFixed(0)}%`} />
       <KpiCell label="最高连板" value={`${data.limit.max_boards || 0}板`} sub={(() => {
         const top = data.limit.tiers.find(t => t.boards === data.limit.max_boards)
@@ -106,6 +126,29 @@ function KpiWidget({ ctx }: { ctx: WidgetCtx }) {
 
 function TrendWidget({ ctx }: { ctx: WidgetCtx }) {
   const { data } = ctx
+  if (ctx.market !== 'cn') {
+    return (
+      <div className="flex h-full flex-col">
+        <SectionTitle icon={LineChart} title="趋势强度" hint="均线/新高低（港美股口径）" />
+        <div className="grid grid-cols-3 gap-1.5">
+          <MiniMetric label="站上MA5" value={`${data.trend.above_ma5_pct.toFixed(0)}%`} cls="text-accent" />
+          <MiniMetric label="站上MA20" value={`${data.trend.above_ma20_pct.toFixed(0)}%`} cls="text-accent" />
+          <MiniMetric label="站上MA60" value={`${data.trend.above_ma60_pct.toFixed(0)}%`} cls="text-accent" />
+          <MiniMetric label="60日新高" value={`${compactCount(data.trend.new_high)}`} cls="text-bull" />
+          <MiniMetric label="60日新低" value={`${compactCount(data.trend.new_low)}`} cls="text-bear" />
+          <MiniMetric label="高低比" value={`${data.trend.new_high + data.trend.new_low > 0 ? Math.round(data.trend.new_high / (data.trend.new_high + data.trend.new_low) * 100) : 50}%`} cls={data.trend.new_high >= data.trend.new_low ? 'text-bull' : 'text-bear'} />
+        </div>
+        <div className="mt-1.5 border-t border-border pt-1.5">
+          <SectionTitle icon={Target} title="强度观察" hint="港美股无涨跌停" />
+          <div className="grid grid-cols-3 gap-1.5">
+            <MiniMetric label="量比" value={fmtPrice(data.activity.vol_ratio, 2)} cls="text-accent" />
+            <MiniMetric label="放量占比" value={`${fmtPrice(data.activity.high_vol_ratio, 1)}%`} cls="text-accent" />
+            <MiniMetric label="新高/新低" value={`${compactCount(data.trend.new_high)}/${compactCount(data.trend.new_low)}`} cls={data.trend.new_high >= data.trend.new_low ? 'text-bull' : 'text-bear'} />
+          </div>
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="flex h-full flex-col">
       <div>
@@ -136,7 +179,7 @@ function TrendWidget({ ctx }: { ctx: WidgetCtx }) {
 
 function MonitorSection({ ctx }: { ctx: WidgetCtx }) {
   return (
-    <section className="h-full overflow-hidden rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
+    <section className="tf-widget h-full overflow-hidden rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <BellRing className="h-3.5 w-3.5 text-accent" />
@@ -149,6 +192,7 @@ function MonitorSection({ ctx }: { ctx: WidgetCtx }) {
       </div>
       <div className="max-h-full overflow-y-auto">
         <MonitorWidget
+          market={ctx.market}
           activeSymbol={ctx.activeSymbol('alert')}
           onStockClick={ctx.openAlert}
         />
@@ -162,11 +206,31 @@ function MonitorSection({ ctx }: { ctx: WidgetCtx }) {
 export const WIDGET_DEFS: WidgetDef[] = [
   {
     id: 'indices', label: '指数行情', icon: Gauge, minW: 4, minH: 2, defW: 12, defH: 2,
-    render: ctx => (
-      <div className="grid h-full grid-cols-2 gap-1 md:grid-cols-4">
-        {ctx.data.indices.map(item => <IndexTicker key={item.symbol} item={item} />)}
-      </div>
-    ),
+    render: ctx => {
+      // overview.indices 只有 A 股；港美股走市场指数接口，绝不把上证/深证塞进港美股看板。
+      const rows = (ctx.market === 'cn' ? ctx.data.indices : ctx.marketIndices ?? []).slice(0, 4)
+      if (rows.length === 0) {
+        if (ctx.marketIndicesLoading) {
+          return (
+            <div className="tf-index-strip grid h-full grid-cols-2 gap-1 md:grid-cols-4">
+              {[0, 1, 2, 3].map(i => (
+                <div key={i} className="tf-shimmer rounded-lg border border-border bg-surface/60" />
+              ))}
+            </div>
+          )
+        }
+        return (
+          <div className="flex h-full items-center justify-center rounded-card border border-border bg-surface/70 text-[11px] text-muted">
+            {`${marketLabel(ctx.market)}指数暂未同步，可在指数页查看/同步`}
+          </div>
+        )
+      }
+      return (
+        <div className="tf-index-strip grid h-full grid-cols-2 gap-1 md:grid-cols-4">
+          {rows.map(item => <IndexTicker key={item.symbol} item={item} />)}
+        </div>
+      )
+    },
   },
   {
     id: 'kpi', label: '大盘指标', icon: BarChart3, minW: 6, minH: 2, defW: 12, defH: 2,
@@ -198,6 +262,7 @@ export const WIDGET_DEFS: WidgetDef[] = [
   },
   {
     id: 'concept-rank', label: '概念热度', icon: Flame, minW: 3, minH: 6, defW: 6, defH: 8,
+    markets: ['cn'],
     render: ctx => (
       <HotRankCard title="概念热度" rank={ctx.data.concept_rank} configUrl="/concept-analysis"
         activeSymbol={ctx.activeSymbol('concept')}
@@ -207,6 +272,7 @@ export const WIDGET_DEFS: WidgetDef[] = [
   },
   {
     id: 'industry-rank', label: '行业热度', icon: Flame, minW: 3, minH: 6, defW: 6, defH: 8,
+    markets: ['cn'],
     render: ctx => (
       <HotRankCard title="行业热度" rank={ctx.data.industry_rank} configUrl="/industry-analysis"
         activeSymbol={ctx.activeSymbol('industry')}
@@ -232,6 +298,7 @@ export const WIDGET_DEFS: WidgetDef[] = [
   },
   {
     id: 'turnover', label: '成交额榜', icon: Coins, minW: 2, minH: 7, defW: 3, defH: 10,
+    markets: ['cn'],
     render: ctx => (
       <StockList title="成交额榜" rows={ctx.data.turnover_leaders} mode="amount"
         activeSymbol={ctx.activeSymbol('amount')}
@@ -241,17 +308,28 @@ export const WIDGET_DEFS: WidgetDef[] = [
   {
     id: 'activity', label: '活跃换手', icon: Repeat, minW: 2, minH: 7, defW: 3, defH: 10,
     render: ctx => (
-      <StockList title="活跃换手" rows={ctx.data.active_leaders} mode="active"
+      <StockList
+        title={ctx.market === 'cn' ? '活跃换手' : '量比活跃'}
+        rows={ctx.data.active_leaders}
+        mode={ctx.market === 'cn' ? 'active' : 'volume'}
         activeSymbol={ctx.activeSymbol('active')}
-        onStockClick={(symbol, name) => ctx.openStock('active', symbol, name, stockListNav(ctx.data.active_leaders))} />
+        onStockClick={(symbol, name) => ctx.openStock('active', symbol, name, stockListNav(ctx.data.active_leaders))}
+      />
     ),
   },
   {
     id: 'ladder', label: '涨停梯队', icon: Flame, minW: 3, minH: 6, defW: 4, defH: 8,
+    markets: ['cn'],
     render: ctx => sectionCard(
       <>
-        <SectionTitle icon={Flame} title="涨停梯队" hint={<span className="inline-flex items-center gap-1">{`涨停 ${ctx.data.limit.limit_up}`}{ctx.isSealedDegrade && <span className="text-[9px] px-1 rounded bg-yellow-500/10 text-yellow-600 dark:text-yellow-500">{ctx.hasDepth ? '未修正' : '降级'}</span>}</span>} />
-        <LadderMini limit={ctx.data.limit} />
+        <SectionTitle
+          icon={Flame}
+          title={ctx.market === 'cn' ? '涨停梯队' : '强度梯队'}
+          hint={ctx.market === 'cn'
+            ? <span className="inline-flex items-center gap-1">{`涨停 ${ctx.data.limit.limit_up}`}{ctx.isSealedDegrade && <span className="text-[9px] px-1 rounded bg-yellow-500/10 text-yellow-600 dark:text-yellow-500">{ctx.hasDepth ? '未修正' : '降级'}</span>}</span>
+            : `60日新高 ${ctx.data.limit.limit_up}`}
+        />
+        <LadderMini limit={ctx.data.limit} market={ctx.market} />
       </>,
     ),
   },
@@ -266,6 +344,16 @@ export const WIDGET_DEFS: WidgetDef[] = [
 ]
 
 const _DEF_INDEX = new Map(WIDGET_DEFS.map(d => [d.id, d]))
+
+/** 市场能力门禁: 未声明 markets 的组件三市场通用。 */
+export function widgetSupportsMarket(t: WidgetType, market: Market): boolean {
+  const def = _DEF_INDEX.get(t)
+  return !!def && (!def.markets || def.markets.includes(market))
+}
+
+export function widgetsForMarket(market: Market): WidgetDef[] {
+  return WIDGET_DEFS.filter(d => !d.markets || d.markets.includes(market))
+}
 
 export function widgetDef(id: WidgetType): WidgetDef | undefined {
   return _DEF_INDEX.get(id)
@@ -298,3 +386,25 @@ export const DEFAULT_LAYOUT: DashboardItem[] = [
   { i: 'turnover', t: 'turnover', x: 4, y: 21, w: 2, h: 13 },
   { i: 'activity', t: 'activity', x: 6, y: 21, w: 2, h: 13 },
 ]
+
+/** 港美股默认布局 — 去掉 A 股专属（概念/行业/成交额/涨停梯队）后的满格形态：
+ *  首行 4 大指数通栏 → KPI → 四列等高中段 → 三榜单 + 右侧监控长条，无空洞。 */
+export const HK_US_LAYOUT: DashboardItem[] = [
+  { i: 'indices', t: 'indices', x: 0, y: 0, w: 12, h: 2 },
+  { i: 'kpi', t: 'kpi', x: 0, y: 2, w: 12, h: 2 },
+  { i: 'distribution', t: 'distribution', x: 0, y: 4, w: 3, h: 9 },
+  { i: 'radar', t: 'radar', x: 3, y: 4, w: 3, h: 9 },
+  { i: 'trend', t: 'trend', x: 6, y: 4, w: 3, h: 9 },
+  { i: 'gainers', t: 'gainers', x: 9, y: 4, w: 3, h: 9 },
+  { i: 'losers', t: 'losers', x: 0, y: 13, w: 3, h: 10 },
+  { i: 'activity', t: 'activity', x: 3, y: 13, w: 3, h: 10 },
+  { i: 'monitor', t: 'monitor', x: 6, y: 13, w: 6, h: 10 },
+]
+
+/** 坐标/尺寸是否与给定布局完全一致（用于判断用户是否自定义过布局）。 */
+export function layoutEquals(a: DashboardItem[], b: DashboardItem[]): boolean {
+  if (a.length !== b.length) return false
+  const key = (it: DashboardItem) => `${it.i}|${it.t}|${it.x}|${it.y}|${it.w}|${it.h}`
+  const set = new Set(b.map(key))
+  return a.every(it => set.has(key(it)))
+}

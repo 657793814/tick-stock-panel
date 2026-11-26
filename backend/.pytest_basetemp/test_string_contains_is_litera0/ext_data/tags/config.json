@@ -1,0 +1,23 @@
+{
+  "id": "tags",
+  "label": "题材标签",
+  "mode": "timeseries",
+  "fields": [
+    {
+      "name": "hot",
+      "dtype": "float",
+      "label": "hot"
+    },
+    {
+      "name": "cat",
+      "dtype": "string",
+      "label": "cat"
+    }
+  ],
+  "description": "",
+  "symbol_map": {},
+  "code_map": {},
+  "market_level": false,
+  "created_at": "2026-11-23T00:47:53.284955",
+  "updated_at": "2026-11-23T00:47:53.284970"
+}

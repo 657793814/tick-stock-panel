@@ -76,10 +76,14 @@ def load_one(data_dir: Path, rule_id: str) -> dict | None:
 
 def save_one(data_dir: Path, rule: dict) -> None:
     _RULE_STORE.save_one(data_dir, rule)
+    _invalidate_list_cache()
 
 
 def delete_one(data_dir: Path, rule_id: str) -> bool:
-    return _RULE_STORE.delete_one(data_dir, rule_id)
+    deleted = _RULE_STORE.delete_one(data_dir, rule_id)
+    if deleted:
+        _invalidate_list_cache()
+    return deleted
 
 
 # ── 校验 ────────────────────────────────────────────────
@@ -373,7 +377,7 @@ def normalize(rule: dict) -> dict:
     else:
         # 防御性过滤, 只保留合法渠道
         r["webhook_channels"] = [
-            c for c in r["webhook_channels"] if c in ("feishu", "wecom", "custom", "email")
+            c for c in r["webhook_channels"] if c in ("feishu", "wecom", "custom", "email", "feishu_app", "wecom_bot")
         ]
     r.setdefault("created_at", datetime.now(timezone.utc).isoformat())
     return r
@@ -383,6 +387,13 @@ def normalize(rule: dict) -> dict:
 _RULE_STORE = JsonDefinitionStore(
     "user_data/monitor_rules", label="monitor rule", normalize=normalize
 )
+
+
+def _invalidate_list_cache() -> None:
+    """规则写操作后失效列表缓存 (API 层 15s 共享缓存)。"""
+    from app import cache_store
+
+    cache_store.invalidate_namespace("monitor-rules")
 
 
 # 策略监控自动迁移的规则 id 前缀 (固定, 保证幂等)

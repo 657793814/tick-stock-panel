@@ -120,7 +120,7 @@ it('refreshes the complete daily and minute library before adding a saved minute
   }))
   await render()
   await act(async () => { await state.builderSaved!('minute', false) })
-  expect(api.screenerStrategies).toHaveBeenLastCalledWith(undefined, 'all')
+  expect(api.screenerStrategies).toHaveBeenLastCalledWith(undefined, 'all', 'cn')
   expect(api.screenerRunAll).not.toHaveBeenCalled()
 })
 
@@ -138,7 +138,7 @@ it('clears a failed minute run when opening a counted daily card, without recalc
 
   await clickCard('日线策略')
 
-  expect(api.screenerCachedResult).toHaveBeenCalledWith('daily', undefined)
+  expect(api.screenerCachedResult).toHaveBeenCalledWith('daily', undefined, 'cn')
   expect(host.textContent).toContain('000001.SZ')
   expect(host.textContent).not.toContain(errorMessage)
   expect(api.screenerRunPreset).toHaveBeenCalledTimes(1)
@@ -150,7 +150,7 @@ it('still displays a genuine error from the currently selected strategy', async 
   await render()
   await clickCard('分钟策略')
   expect(host.textContent).toContain(errorMessage)
-  expect(api.screenerRunPreset).toHaveBeenCalledWith('minute', undefined, undefined, undefined, 'stock', '1m', true)
+  expect(api.screenerRunPreset).toHaveBeenCalledWith('minute', undefined, undefined, undefined, 'stock', '1m', true, 'cn')
 })
 
 it('does not attach a late failure from the previous card to the cached strategy now being viewed', async () => {

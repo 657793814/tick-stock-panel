@@ -27,6 +27,7 @@ from app.api import (
     guardian,
     import_center,
     indices,
+    indices_market,
     intraday,
     kline,
     lab,
@@ -243,6 +244,20 @@ async def _application_lifespan(app: FastAPI):
     strategy_monitor = StrategyMonitorService()
     app.state.strategy_monitor = strategy_monitor
     qs.set_app_state(app.state)
+
+    # 港美股实时快照服务(腾讯免费源, 独立轮询, merge 写共享存储):
+    # 与 A 股 QuoteService 并列, 只在各市场交易时段拉自选+维表前 N 只。
+    try:
+        from app.services.market_quote import get_service as get_market_quote_service
+
+        market_qs = get_market_quote_service()
+        market_qs.set_repo(repo)
+        market_qs.set_app_state(app.state)
+        app.state.market_quote_service = market_qs
+        if market_qs.start():
+            logger.info("market quote service started (hk/us 腾讯源, 交易时段轮询)")
+    except Exception as e:  # noqa: BLE001 - 免费源不可用时 A 股链路不受影响
+        logger.warning("market quote service start failed: %s", e)
 
     # 五档盘口 sealed 服务(真假涨停/跌停, 独立旁路线)
     from app.services.depth_service import DepthService
@@ -519,6 +534,9 @@ async def _application_lifespan(app: FastAPI):
         qs = getattr(app.state, "quote_service", None)
         if qs:
             qs.stop()
+        mqs = getattr(app.state, "market_quote_service", None)
+        if mqs:
+            mqs.stop()
         dsvc = getattr(app.state, "depth_service", None)
         if dsvc:
             dsvc.stop_polling()
@@ -701,6 +719,7 @@ app.include_router(guardian.router)
 app.include_router(lab.router)
 app.include_router(intraday.router)
 app.include_router(indices.router)
+app.include_router(indices_market.router)
 app.include_router(overview.router)
 app.include_router(pages_admin.router)
 app.include_router(paper.router)

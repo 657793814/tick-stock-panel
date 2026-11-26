@@ -6,6 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.api.market_guard import require_cn_market
 from app.services import sector_rotation
 
 router = APIRouter(prefix="/api/sector-rotation", tags=["sector-rotation"])
@@ -25,6 +26,7 @@ def get_sector_rotation(
         "activity",
         description="自动榜排序维度: activity=近30分钟成交额, score=综合分, pct=现涨幅, rank_change=1h排名跃升, momentum=近1小时动量(走强→走弱), flow=扩展资金流",
     ),
+    market: str = Query("cn", description="逻辑市场: 仅支持 cn（概念/行业板块分类是 A 股专属数据）"),
 ):
     """盘中板块切换走势: 全量分钟K聚合到板块, 涨幅 + 扩展资金流综合评分。
 
@@ -33,6 +35,7 @@ def get_sector_rotation(
     不足时回退不过滤)。
     数据不可用时返回明确的 no_data/empty 状态与原因, 不静默。
     """
+    require_cn_market(market, feature="板块轮动")
     names: list[str] | None = None
     if series_names:
         names = _parse_str_array(series_names, "series_names")

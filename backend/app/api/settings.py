@@ -681,6 +681,9 @@ def get_preferences() -> dict:
         "system_notify_enabled": preferences.get_system_notify_enabled(),
         "feishu_webhook_url": preferences.get_feishu_webhook_url(),
         "feishu_webhook_secret": preferences.get_feishu_webhook_secret(),
+        "feishu_app_id": preferences.get_feishu_app_id(),
+        "feishu_app_chat_id": preferences.get_feishu_app_chat_id(),
+        "feishu_app_secret_set": bool(secrets_store.get_feishu_app_secret()),
         "wecom_webhook_url": preferences.get_wecom_webhook_url(),
         "custom_webhook_url": preferences.get_custom_webhook_url(),
         "custom_webhook_secret_set": bool(secrets_store.get_custom_webhook_secret()),
@@ -689,8 +692,13 @@ def get_preferences() -> dict:
         "wecom_bot_id": preferences.get_wecom_bot_id(),
         "wecom_bot_secret": preferences.get_wecom_bot_secret(),
         "wecom_bot_enabled": preferences.get_wecom_bot_enabled(),
+        "wecom_bot_chat_id": preferences.get_wecom_bot_chat_id(),
+        "wecom_bot_chat_type": preferences.get_wecom_bot_chat_type(),
+        "wecom_bot_chats": preferences.get_wecom_bot_chats(),
         "webhook_enabled_default": preferences.get_webhook_enabled_default(),
-        "webhook_default_channels": preferences.get_webhook_default_channels(),
+        # 两键同值: 老键保留兼容, 新键表达「勾选=启用渠道」的真实语义
+        "webhook_default_channels": preferences.get_webhook_enabled_channels(),
+        "webhook_enabled_channels": preferences.get_webhook_enabled_channels(),
         "minute_intraday_refresh": preferences.get_minute_intraday_refresh(),
         "minute_intraday_refresh_interval": preferences.get_minute_intraday_refresh_interval(),
         "monitor_ext_fields": preferences.get_monitor_ext_fields(),
@@ -1544,6 +1552,58 @@ def update_feishu_webhook(req: FeishuWebhookPrefsIn) -> dict:
     return {"feishu_webhook_url": saved_url, "feishu_webhook_secret": saved_secret}
 
 
+class FeishuAppPrefsIn(BaseModel):
+    app_id: str = ""
+    # None 保持已保存的 App Secret; 空串表示清空
+    secret: str | None = None
+    chat_id: str = ""
+
+
+@router.put("/preferences/feishu-app")
+def update_feishu_app(req: FeishuAppPrefsIn) -> dict:
+    """飞书自建应用机器人 (App ID + App Secret + 目标群 chat_id)。
+
+    与飞书自定义机器人 Webhook 并列的另一条飞书通道: Webhook 只能推到建群时
+    选定的群, 应用机器人可按 chat_id 推到机器人已加入的任意群。
+    三项任一为空即视为未配置, 推送时跳过。
+    """
+    from app.services import preferences
+
+    app_id = (req.app_id or "").strip()
+    chat_id = (req.chat_id or "").strip()
+    preferences.set_feishu_app_id(app_id)
+    preferences.set_feishu_app_chat_id(chat_id)
+    if req.secret is not None:
+        secrets_store.set_feishu_app_secret(req.secret)
+    if not app_id:
+        # 清空 App ID 时连带清掉密钥/目标群, 避免留下无法使用的半套配置
+        secrets_store.set_feishu_app_secret("")
+        preferences.set_feishu_app_chat_id("")
+    return {
+        "feishu_app_id": preferences.get_feishu_app_id(),
+        "feishu_app_chat_id": preferences.get_feishu_app_chat_id(),
+        "feishu_app_secret_set": bool(secrets_store.get_feishu_app_secret()),
+    }
+
+
+@router.get("/preferences/feishu-app-chats")
+def list_feishu_app_chats() -> dict:
+    """列出应用机器人已加入的群, 供设置页选择目标群。
+
+    读不到时返回 ok=False + 原因 (权限未开/凭证错), 不抛 4xx:
+    与 webhook-test 一致, 前端统一按 detail 渲染。
+    """
+    from app.services import feishu_app, preferences
+
+    chats, err = feishu_app.list_chats(
+        preferences.get_feishu_app_id(),
+        secrets_store.get_feishu_app_secret(),
+    )
+    if err:
+        return {"ok": False, "detail": err, "chats": []}
+    return {"ok": True, "detail": "", "chats": chats}
+
+
 class WecomWebhookPrefsIn(BaseModel):
     url: str
 
@@ -1649,7 +1709,7 @@ def update_email_smtp(req: EmailSmtpPrefsIn) -> dict:
 
 
 class WebhookTestIn(BaseModel):
-    channel: Literal["feishu", "wecom", "custom", "email"]
+    channel: Literal["feishu", "wecom", "custom", "email", "feishu_app", "wecom_bot"]
 
 
 @router.post("/preferences/webhook-test")
@@ -1695,19 +1755,49 @@ def test_webhook(req: WebhookTestIn) -> dict:
             secret=secrets_store.get_custom_webhook_secret(),
             max_attempts=1,
         )
+    elif req.channel == "feishu_app":
+        from app.services import feishu_app
+
+        app_id = preferences.get_feishu_app_id()
+        app_secret = secrets_store.get_feishu_app_secret()
+        chat_id = preferences.get_feishu_app_chat_id()
+        if not feishu_app.is_configured(app_id, app_secret, chat_id):
+            return {"ok": False, "detail": "尚未完整配置飞书应用机器人(App ID / App Secret / 目标群), 请先保存"}
+        ok, err = feishu_app.send_text_diagnose(app_id, app_secret, chat_id, title, body)
+        if not ok:
+            # 飞书错误码(无权限/机器人不在群/群不存在)对用户可直接执行, 原样带回
+            return {"ok": False, "detail": "推送失败：" + err}
+    elif req.channel == "wecom_bot":
+        from app.services.wecom_bot_service import WecomBotService
+
+        bot_svc = WecomBotService.instance()
+        if bot_svc is None:
+            return {"ok": False, "detail": "智能机器人服务未启动, 请重启服务后重试"}
+        chat_id = preferences.get_wecom_bot_chat_id()
+        if not chat_id:
+            return {"ok": False, "detail": "尚未选择目标会话: 请先在群里 @机器人发一条消息, 再从会话列表选择"}
+        status = bot_svc.status()
+        if not status.get("connected"):
+            detail = status.get("last_error") or "请检查 BotID/Secret 并确认已启用长连接"
+            return {"ok": False, "detail": "智能机器人长连接未连接: " + str(detail)}
+        ok, err = bot_svc.send_text(chat_id, f"{title}\n{body}")
+        if not ok:
+            return {"ok": False, "detail": "推送失败：" + err}
     else:  # email
         from app.services import email_adapter
 
         config = preferences.get_email_smtp_config()
         if not email_adapter.is_configured(config):
             return {"ok": False, "detail": "尚未完整配置邮件 SMTP, 请先保存"}
-        ok = email_adapter.send_email(
+        ok, err = email_adapter.send_email_diagnose(
             config,
             secrets_store.get_email_smtp_password(),
             title,
             body,
-            max_attempts=1,
         )
+        if not ok:
+            # 邮件失败原因对用户可操作(主机写错/授权码错), 直接带回而不是让用户翻日志
+            return {"ok": False, "detail": "推送失败：" + email_adapter.explain_failure(err)}
 
     if ok:
         return {"ok": True, "detail": "测试消息已发送, 请检查对应接收端"}
@@ -1732,6 +1822,9 @@ def update_wecom_bot(req: WecomBotPrefsIn, request: Request) -> dict:
 
     bot_id = (req.bot_id or "").strip()
     secret = (req.secret or "").strip()
+    # 留空表示「沿用已保存密钥」(前端不回显明文)。BotID 清空才是彻底清除。
+    if bot_id and not secret and bot_id == preferences.get_wecom_bot_id():
+        secret = preferences.get_wecom_bot_secret()
     preferences.set_wecom_bot_id(bot_id)
     preferences.set_wecom_bot_secret(secret)
     # 凭证不齐时强制关闭(避免 enabled=True 但连不上)
@@ -1777,6 +1870,40 @@ def toggle_wecom_bot(req: WecomBotToggleIn, request: Request) -> dict:
     return {"wecom_bot_enabled": enabled, "wecom_bot_status": status}
 
 
+class WecomBotChatIn(BaseModel):
+    chat_id: str
+    chat_type: int | None = None
+
+
+@router.get("/preferences/wecom-bot-chats")
+def get_wecom_bot_chats() -> dict:
+    """列出长连接已发现的会话 (来自机器人收到的消息回调)。
+
+    企业微信没有「拉取机器人会话列表」的开放接口: 需先在群里 @机器人
+    或给机器人发单聊, 后端记录到 chatid 后才能在这里选目标。
+    """
+    from app.services import preferences
+
+    chats = preferences.get_wecom_bot_chats()
+    return {
+        "ok": True,
+        "chats": chats,
+        "detail": "" if chats else "还没有发现会话: 请先在群里 @机器人 或给机器人发一条单聊消息",
+    }
+
+
+@router.put("/preferences/wecom-bot-chat")
+def update_wecom_bot_chat(req: WecomBotChatIn) -> dict:
+    """保存智能机器人主动推送的目标会话。"""
+    from app.services import preferences
+
+    chat_id = preferences.set_wecom_bot_chat_id(req.chat_id, req.chat_type)
+    return {
+        "wecom_bot_chat_id": chat_id,
+        "wecom_bot_chat_type": preferences.get_wecom_bot_chat_type(),
+    }
+
+
 class WebhookEnabledDefaultIn(BaseModel):
     enabled: bool
 
@@ -1795,20 +1922,21 @@ def update_webhook_enabled_default(req: WebhookEnabledDefaultIn) -> dict:
 
 
 class WebhookDefaultChannelsIn(BaseModel):
-    channels: list[str]  # 多选: feishu / wecom / custom / email; 空数组=不推送
+    channels: list[str]  # 全局启用的渠道: feishu/feishu_app/wecom/wecom_bot/custom/email; 空数组=全部关闭
 
 
 @router.put("/preferences/webhook-default-channels")
 def update_webhook_default_channels(req: WebhookDefaultChannelsIn) -> dict:
-    """新建监控规则时默认勾选的推送渠道 (多选)。
+    """设置页勾选的「启用推送渠道」(多选)。
 
-    作为新建规则的默认推送渠道预填, 单条规则仍可在规则编辑页独立修改。
-    空数组=默认不推送。白名单外的渠道会被过滤掉。
+    勾选=该渠道打开并允许推送; 取消=全局关闭。新建规则会预填已启用渠道,
+    单条规则仍可独立增删; 后端分发只投递「全局启用 + 规则勾选 + 已配置」。
+    存储键沿用历史名 webhook_default_channels, 同时回传新键方便前端迁移。
     """
     from app.services import preferences
 
-    saved = preferences.set_webhook_default_channels(req.channels)
-    return {"webhook_default_channels": saved}
+    saved = preferences.set_webhook_enabled_channels(req.channels)
+    return {"webhook_default_channels": saved, "webhook_enabled_channels": saved}
 
 
 @router.put("/preferences/quote-interval")

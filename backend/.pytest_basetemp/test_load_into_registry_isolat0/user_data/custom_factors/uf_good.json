@@ -1,0 +1,8 @@
+{
+  "id": "uf_good",
+  "kind": "custom",
+  "version": 1,
+  "label": "好因子",
+  "formula": "close + 1",
+  "status": "draft"
+}

@@ -21,6 +21,7 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useChartTheme, useTheme } from '@/lib/theme'
+import { useMarket, marketLabel } from '@/lib/market'
 import { toast } from '@/components/Toast'
 import { Modal } from '@/components/Modal'
 import { cn } from '@/lib/cn'
@@ -163,11 +164,24 @@ export function Regime() {
   const [calendarExpanded, setCalendarExpanded] = useState(false)
   const ct = useChartTheme()
   const theme = useTheme()
+  // 全局市场切换: Regime 按市场请求后端独立时序表 (hk/us 用动量替代投机维度)。
+  const { market } = useMarket()
+  const isCn = market === 'cn'
+  const marketScope = isCn ? null : <span className="regime-market-scope">当前市场：{marketLabel(market)}</span>
+  // 情绪周期页是 A 股涨停/连板口径, 港美股不展示; 切市场时回到环境视图
+  const tabs = useMemo(
+    () => ([['regime', '市场环境', Activity], ['phase', '情绪周期', Flame]] as const)
+      .filter(([k]) => isCn || k === 'regime'),
+    [isCn],
+  )
+  useEffect(() => {
+    if (!isCn) setView('regime')
+  }, [isCn])
 
   // coverage: "全部"模式 + 标题展示依赖
   const coverage = useQuery({
-    queryKey: QK.regimeCoverage,
-    queryFn: () => api.regimeCoverage(),
+    queryKey: QK.regimeCoverage(market),
+    queryFn: () => api.regimeCoverage(market),
     staleTime: 5 * 60 * 1000,
   })
 
@@ -177,16 +191,16 @@ export function Regime() {
   // queryKey 用实际请求三元组 (QK 集中定义): 'all' 在 coverage 到达前后参数
   // 不同会自动换键重拉; 补算后经裸前缀 regimeHistoryPrefix 失效所有变体
   const history = useQuery({
-    queryKey: QK.regimeHistory(histRange),
-    queryFn: () => api.regimeHistory(histRange.start, histRange.end, histRange.limit),
+    queryKey: QK.regimeHistory(histRange, market),
+    queryFn: () => api.regimeHistory(histRange.start, histRange.end, histRange.limit, market),
     staleTime: 5 * 60 * 1000,
     // '全部' 依赖 coverage 的真实日期范围: 到达前不发请求 (先发会把后端默认
     // 窗口数据短暂当成"全部"渲染), coverage 失败时兜底放行避免查询永久禁用
     enabled: range !== 'all' || !!coverage.data || !!coverage.error,
   })
   const states = useQuery({
-    queryKey: QK.regimeStates(days),
-    queryFn: () => api.regimeStates(days),
+    queryKey: QK.regimeStates(days, market),
+    queryFn: () => api.regimeStates(days, market),
     staleTime: 5 * 60 * 1000,
   })
   const rows: RegimeRow[] = history.data?.rows ?? []
@@ -467,7 +481,7 @@ export function Regime() {
           lineStyle: { width: 1.2, color: '#10b981', type: 'dashed' }, z: 2 },
       ],
     }
-  }, [rows, days, ct, theme, hasPhaseData, selDate])
+  }, [rows, days, ct, theme, hasPhaseData, selDate, isCn])
   const [phaseChartInst, setPhaseChartInst] = useState<echarts.ECharts | null>(null)
   const phaseChartRef = useEChart(phaseOption, [phaseOption, view], setPhaseChartInst)
   // 点击图表任意位置 → 选中最近的交易日 (zrender 级监听, 命中区为整个网格,
@@ -516,16 +530,19 @@ export function Regime() {
     })
 
     const subLineStyle = { width: 1.2, type: 'dotted' as const, opacity: 0.8 }
+    // 港美股无涨跌停: 同一列承载的是 60 日新高数, 投机维度用动量替代
+    const barLabel = isCn ? '涨停数' : '新高数'
+    const specLabel = isCn ? '投机' : '动量'
 
     return {
       backgroundColor: 'transparent',
       tooltip: { trigger: 'axis', confine: true, backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder, textStyle: { color: ct.tooltipText } },
       legend: {
         type: 'scroll', itemWidth: 12, itemHeight: 7, itemGap: 16, inactiveColor: ct.text,
-        data: ['综合分', '涨停数', '赚钱', '投机', '抗跌', '趋势'],
+        data: ['综合分', barLabel, '赚钱', specLabel, '抗跌', '趋势'],
         textStyle: { color: ct.text, fontSize: 11 }, top: 0,
         // 综合分与低强调涨停柱同屏, 四维指标可按需叠加
-        selected: { '综合分': true, '涨停数': true, '赚钱': false, '投机': false, '抗跌': false, '趋势': false },
+        selected: { '综合分': true, [barLabel]: true, '赚钱': false, [specLabel]: false, '抗跌': false, '趋势': false },
       },
       grid: { left: 40, right: 68, top: 44, bottom: 56 },
       xAxis: {
@@ -542,13 +559,13 @@ export function Regime() {
         { type: 'slider', bottom: 8, height: 20, borderColor: ct.border, fillerColor: ct.zoomFill, textStyle: { color: ct.text } },
       ],
       series: [
-        // 涨停数柱状(辅助右轴, 单位为家)
-        { name: '涨停数', type: 'bar', data: limitUps, yAxisIndex: 1, barMaxWidth: 6,
+        // 涨停数/新高数柱状(辅助右轴, 单位为家)
+        { name: barLabel, type: 'bar', data: limitUps, yAxisIndex: 1, barMaxWidth: 6,
           itemStyle: { color: REGIME_STATE_COLORS.strong, opacity: 0.22 }, z: 1 },
         // 4 子维度与综合分共用左轴 0–100, 点图例可切换。
         { name: '赚钱', type: 'line', itemStyle: { color: '#f59e0b' }, data: profit, smooth: true, symbol: 'none', yAxisIndex: 0,
           lineStyle: { ...subLineStyle, color: '#f59e0b' }, z: 2 },
-        { name: '投机', type: 'line', itemStyle: { color: '#a855f7' }, data: speculation, smooth: true, symbol: 'none', yAxisIndex: 0,
+        { name: specLabel, type: 'line', itemStyle: { color: '#a855f7' }, data: speculation, smooth: true, symbol: 'none', yAxisIndex: 0,
           lineStyle: { ...subLineStyle, color: '#a855f7' }, z: 2 },
         { name: '抗跌', type: 'line', itemStyle: { color: '#10b981' }, data: resilience, smooth: true, symbol: 'none', yAxisIndex: 0,
           lineStyle: { ...subLineStyle, color: '#10b981' }, z: 2 },
@@ -648,7 +665,7 @@ export function Regime() {
   const handleRecompute = async () => {
     setRecomputing(true)
     try {
-      const r = await api.regimeRecompute()
+      const r = await api.regimeRecompute(undefined, undefined, market)
       toast(r.computed > 0 ? `重算完成 · 新增 ${r.computed} 天` : '重算完成 · 数据已是最新', 'success')
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['regime-history'] }),
@@ -656,7 +673,7 @@ export function Regime() {
         qc.invalidateQueries({ queryKey: ['regime-latest'] }),
         qc.invalidateQueries({ queryKey: ['regime-phases'] }),
         qc.invalidateQueries({ queryKey: ['regime-mainline'] }),
-        qc.invalidateQueries({ queryKey: QK.regimeCoverage }),
+        qc.invalidateQueries({ queryKey: QK.regimeCoverage(market) }),
       ])
     } catch (e) {
       toast(`重算失败 · ${String((e as Error)?.message || e)}`, 'error')
@@ -676,8 +693,11 @@ export function Regime() {
         <div className="regime-heading-copy">
           <Activity className="regime-heading-icon" aria-hidden="true" /><h1>市场环境</h1>
           <p>
-            {view === 'phase' ? '涨停情绪 · 市场阶段 · 主线脉络' : '每日环境状态 · 赚钱效应 · 趋势分析'}
+            {view === 'phase'
+              ? '涨停情绪 · 市场阶段 · 主线脉络'
+              : isCn ? '每日环境状态 · 赚钱效应 · 趋势分析' : '量价/动量/抗跌/趋势 四维评分'}
           </p>
+          {marketScope}
         </div>
           <div className="regime-toolbar">
             <div className="regime-range" role="group" aria-label="时间范围">
@@ -712,13 +732,18 @@ export function Regime() {
       {/* ── 视图切换: 市场环境 / 情绪周期 (两组内容 tab 隔离, 减少单页高度) ── */}
       <div className="regime-tabbar">
         <div className="regime-tabs" role="tablist" aria-label="市场环境视图">
-          {([['regime', '市场环境', Activity], ['phase', '情绪周期', Flame]] as const).map(([k, label, Icon]) => (
+          {(tabs).map(([k, label, Icon]) => (
             <button key={k} id={`regime-tab-${k}`} type="button" role="tab"
               aria-selected={view === k} aria-controls={`regime-panel-${k}`} tabIndex={view === k ? 0 : -1}
               onClick={() => setView(k)}
               onKeyDown={event => {
-                const next = event.key === 'Home' ? 'regime' : event.key === 'End' ? 'phase'
-                  : ['ArrowLeft', 'ArrowRight'].includes(event.key) ? (k === 'regime' ? 'phase' : 'regime') : null
+                // 键盘切换只在本市场可见的 tab 之间移动 (港美股没有情绪周期页)
+                const idx = tabs.findIndex(([key]) => key === k)
+                const next = event.key === 'Home' ? tabs[0][0]
+                  : event.key === 'End' ? tabs[tabs.length - 1][0]
+                  : event.key === 'ArrowLeft' ? tabs[Math.max(0, idx - 1)][0]
+                  : event.key === 'ArrowRight' ? tabs[Math.min(tabs.length - 1, idx + 1)][0]
+                  : null
                 if (next) {
                   event.preventDefault()
                   setView(next)
@@ -1056,7 +1081,7 @@ export function Regime() {
               <div className="regime-dimensions">
                 {([
                   { label: '赚钱', val: latest.profit_score, color: '#f59e0b' },
-                  { label: '投机', val: latest.speculation_score, color: '#a855f7' },
+                  { label: isCn ? '投机' : '动量', val: latest.speculation_score, color: '#a855f7' },
                   { label: '抗跌', val: latest.resilience_score, color: '#10b981' },
                   { label: '趋势', val: latest.trend_score, color: '#3b82f6' },
                 ] as const).map(d => (
@@ -1098,7 +1123,7 @@ export function Regime() {
         {rows.length > 0 && (
           <div className="regime-trend-grid">
             <section className={cardCls} aria-label="市场环境历史趋势">
-              <SectionTitle icon={Activity} title="环境综合分趋势" hint="点图例可叠加四维指标与涨停数" />
+              <SectionTitle icon={Activity} title="环境综合分趋势" hint={isCn ? '点图例可叠加四维指标与涨停数' : '点图例可叠加四维指标与 60 日新高数'} />
               <div ref={trendRef} className="regime-chart" role="img" aria-label="环境综合分及四维指标历史趋势图" />
             </section>
             <section className={cardCls} aria-label="历史环境状态分布">
@@ -1176,6 +1201,7 @@ function MainlineFilterPanel({ filter, onDone }: {
   filter: { min_members: number; max_members: number; blacklist: string[]; exclude_st?: boolean } | undefined
   onDone: () => Promise<void>
 }) {
+  const { market } = useMarket()
   const [minMembers, setMinMembers] = useState(String(filter?.min_members ?? 4))
   const [maxMembers, setMaxMembers] = useState(String(filter?.max_members ?? 600))
   const [blacklist, setBlacklist] = useState<string[]>(filter?.blacklist ?? [])
@@ -1213,7 +1239,7 @@ function MainlineFilterPanel({ filter, onDone }: {
       const stChanged = excludeSt !== (filter?.exclude_st ?? true)
       if (stChanged) {
         // 口径切换影响情绪周期驱动指标, 需全量重算 regime+主线(较重, 需等待)
-        await api.regimeRecompute()
+        await api.regimeRecompute(undefined, undefined, market)
         toast('过滤已保存, 主线与情绪周期已全量重算', 'success')
       } else {
         await api.regimeMainlineRecompute()

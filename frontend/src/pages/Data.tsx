@@ -35,6 +35,7 @@ import { useToggleRealtimeQuotes, useUpdateQuoteInterval } from '@/lib/useShared
 import { MissingCapChip, routeCap, routeCapUsable, routeProviderDisplay, type RouteCapId } from '@/lib/capability-labels'
 import { QK, DAILY_DATA_QUERY_PREFIXES } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
+import { useMarket, marketLabel } from '@/lib/market'
 import { useAdjFactorSyncGate } from '@/components/AdjFactorSyncGate'
 import { formatScheduleDatePart, formatScheduleTimePart, isToday } from '@/lib/format'
 import { findDataSource } from '@/lib/dataSources'
@@ -71,6 +72,8 @@ export function Data() {
 
   const caps = useCapabilities()
   const settings = useSettings()
+  // 全局市场切换: Data 视图遵循全局市场（本地 data 数据为现状共享，市场作用由顶部提示 + 市场注册表体现）
+  const { market } = useMarket()
   // 测试端点仅探测 TickFlow 通道 — 未配置 TickFlow Key 时隐藏入口
   const hasTickflowKey = settings.data?.has_tickflow_key ?? settings.data?.mode === 'api_key'
 
@@ -86,7 +89,7 @@ export function Data() {
   // 市场环境(regime) 覆盖画像 —— 走独立接口(/api/regime/coverage), 不在 data/status 内。
   // 同步任务完成后刷新一次; 平时 30s 轮询与 status 对齐。
   const regimeCoverage = useQuery({
-    queryKey: QK.regimeCoverage,
+    queryKey: QK.regimeCoverage(),
     queryFn: () => api.regimeCoverage(),
     refetchInterval: activeJobId ? false : 30_000,
   })
@@ -296,7 +299,7 @@ export function Data() {
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       qc.invalidateQueries({ queryKey: QK.dataIntegrity })
       // 同步任务结束后 regime 覆盖范围可能变化, 一并刷新画像
-      qc.invalidateQueries({ queryKey: QK.regimeCoverage })
+      qc.invalidateQueries({ queryKey: QK.regimeCoverage() })
       // 同步重写了指数日K/enriched/日K → 失效消费这些数据的查询。
       // 侧边栏指数查询挂在 Layout 常驻不重挂载 (refetchOnWindowFocus 已关),
       // 不失效会一直显示同步前的旧值; 自选相关查询在页面正打开时同理。
@@ -611,6 +614,7 @@ export function Data() {
       <PageHeader
         title="数据"
         subtitle="本地数据画像 · 同步状态 · 历史记录"
+        titleExtra={market !== 'cn' ? <span className="rounded-full border border-border bg-elevated px-2 py-0.5 text-[10px] text-secondary">当前市场：{marketLabel(market)}</span> : null}
         right={
           <div className="flex items-center gap-3">
             <button

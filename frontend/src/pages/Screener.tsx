@@ -13,6 +13,7 @@ import { QK } from '@/lib/queryKeys'
 import { pendingStrategyIds, pollingInterval, useDocumentVisible } from '@/lib/refreshPolicy'
 import { storage } from '@/lib/storage'
 import { PageHeader } from '@/components/PageHeader'
+import { useMarket, marketLabel } from '@/lib/market'
 import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -60,6 +61,8 @@ export function Screener() {
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [previewName, setPreviewName] = useState<string>('')
   const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
+  // 全局市场切换: Screener 视图遵循全局市场（本地策略池为现状共享，市场作用由顶部提示 + 市场注册表体现）
+  const { market } = useMarket()
   const closePreview = useCallback(() => {
     setPreviewSymbol(null)
     setPreviewName('')
@@ -184,10 +187,11 @@ export function Screener() {
   const { data: prefs } = usePreferences()
   const screenerAutoRun = prefs?.screener_auto_run ?? true
 
-  // 统一列表: 不按周期过滤, 日线+分钟策略合并返回, 分钟策略带 timeframes 标识
+  // 统一列表: 不按周期过滤, 日线+分钟策略合并返回, 分钟策略带 timeframes 标识。
+  // 带 market 取回 market_supported, 港美股据此置灰涨停/连板类策略。
   const strategies = useQuery({
-    queryKey: [...QK.screenerStrategies('all'), 'all'],
-    queryFn: () => api.screenerStrategies(undefined, 'all'),
+    queryKey: [...QK.screenerStrategies('all', '1d', market), 'all'],
+    queryFn: () => api.screenerStrategies(undefined, 'all', market),
     staleTime: 60_000,  // 策略池清单慢变 (与 Paper 同款), 减少切页重拉
   })
 
@@ -210,24 +214,26 @@ export function Screener() {
   const documentVisible = useDocumentVisible()
   const inTradingSession = quoteStatus.data?.is_trading_hours !== false
   const summaryQuery = useQuery({
-    queryKey: pendingRun?.taskId ? [...QK.screenerCachedSummary, pendingRun.taskId] : QK.screenerCachedSummary,
-    queryFn: () => api.screenerCachedSummary(pendingRun?.taskId),
+    queryKey: pendingRun?.taskId
+      ? [...QK.screenerCachedSummary(market), pendingRun.taskId]
+      : QK.screenerCachedSummary(market),
+    queryFn: () => api.screenerCachedSummary(pendingRun?.taskId, market),
     placeholderData: previous => previous,
     enabled: assetType === 'stock',
     refetchInterval: pendingRun ? pollingInterval(2000, false, documentVisible) : false,
   })
 
   const fullCachedQuery = useQuery({
-    queryKey: QK.screenerCached(asOf, extColumnsParam),
-    queryFn: () => api.screenerCached(extColumnsParam || undefined),
+    queryKey: QK.screenerCached(asOf, extColumnsParam, market),
+    queryFn: () => api.screenerCached(extColumnsParam || undefined, market),
     enabled: assetType === 'stock' && tfFilter !== '1m' && showAll,
     // 交易时段跟随行情轮询; 收盘后价格不再变, 降为 60s 仅兜底数据修正
     refetchInterval: pollingInterval(inTradingSession ? 6_000 : 60_000, false, documentVisible),
   })
 
   const singleCachedQuery = useQuery({
-    queryKey: QK.screenerCachedResult(activeStrategy ?? '', asOf, extColumnsParam),
-    queryFn: () => api.screenerCachedResult(activeStrategy!, extColumnsParam || undefined),
+    queryKey: QK.screenerCachedResult(activeStrategy ?? '', asOf, extColumnsParam, market),
+    queryFn: () => api.screenerCachedResult(activeStrategy!, extColumnsParam || undefined, market),
     enabled: assetType === 'stock'
       && activeStrategyTimeframe === '1d'
       && !showAll
@@ -389,6 +395,7 @@ export function Screener() {
         assetType,
         '1d',
         ensure,
+        market,
       ),
     onSuccess: (data) => {
       if (data.as_of) setAsOf(data.as_of)
@@ -411,6 +418,9 @@ export function Screener() {
         for (const id of data.skipped_unknown) removeFromPool(id)
         toast(`已跳过 ${data.skipped_unknown.length} 个不存在的策略，并从策略池移除`, 'success')
       }
+      if (data.skipped_unsupported?.length) {
+        toast(`${marketLabel(market)} 已跳过 ${data.skipped_unsupported.length} 个涨停/连板类策略`, 'success')
+      }
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
     },
   })
@@ -421,7 +431,7 @@ export function Screener() {
   // 同一套 2s 轮询点亮 (arrived 判据用 computed_at)。
   const runAllMinute = useMutation({
     mutationFn: (strategyIds: string[]) =>
-      api.screenerRunAll(undefined, strategyIds, assetType, '1m', true),
+      api.screenerRunAll(undefined, strategyIds, assetType, '1m', true, market),
     onSuccess: (data) => {
       const counts: Record<string, number> = {}
       for (const [id, item] of Object.entries(data.results)) {
@@ -775,7 +785,7 @@ export function Screener() {
   // 执行周期由策略自身声明决定: 日线走盘后缓存/单跑, 分钟走本地分钟K分区实时跑
   const run = useMutation({
     mutationFn: ({ id, date, timeframe: tf, ensure = false }: { id: string; date: string; timeframe: '1d' | '1m'; ensure?: boolean }) =>
-      api.screenerRunPreset(id, undefined, date || undefined, extColumnsParam || undefined, assetType, tf, ensure),
+      api.screenerRunPreset(id, undefined, date || undefined, extColumnsParam || undefined, assetType, tf, ensure, market),
     onSuccess: (data, vars) => {
       setResult(data)
       // 同步更新卡片上的命中数
@@ -923,26 +933,39 @@ export function Screener() {
     const selfRunning = run.isPending && activeStrategy === s.id
     // 分钟批量计算中: 卡片脉冲占位, 算完数字自动点亮
     const minuteRunning = isMinute && runAllMinute.isPending
+    // 港美股没有涨跌停/连板语义, 后端已把这类策略标记为不适用, 这里置灰并拦截点击
+    const unsupported = market !== 'cn' && s.market_supported === false
     return (
-      <StrategyCard
+      <span
         key={s.id}
-        name={s.name}
-        description={s.description}
-        source={s.source}
-        active={activeStrategy === s.id}
-        count={hitCounts[id]}
-        expiredCount={expiredCounts[id]}
-        loading={runAll.isPending}
-        computing={pendingRunIds.has(id) || selfRunning || minuteRunning}
-        awaitRun={hitCounts[id] == null && isMinute && !selfRunning && !minuteRunning}
-        cardSize={cardSize}
-        onRun={() => handleRun(s)}
-        disabled={run.isPending && activeStrategy === s.id}
-        onSettings={() => setSettingsStrategyId(s.id)}
-        monitored={strategyMonitorMap.has(`${assetType}:${s.id}`)}
-        onToggleMonitor={() => toggleStrategyMonitor(s.id, s.name)}
-        timeframeBadge={isMinute ? '分钟' : undefined}
-      />
+        title={unsupported ? `${marketLabel(market)} 无涨跌停/连板口径，该策略不适用` : undefined}
+        className={unsupported ? 'inline-block cursor-not-allowed opacity-40 saturate-0' : undefined}
+      >
+        <StrategyCard
+          name={s.name}
+          description={s.description}
+          source={s.source}
+          active={activeStrategy === s.id}
+          count={unsupported ? undefined : hitCounts[id]}
+          expiredCount={unsupported ? undefined : expiredCounts[id]}
+          loading={runAll.isPending}
+          computing={unsupported ? false : (pendingRunIds.has(id) || selfRunning || minuteRunning)}
+          awaitRun={!unsupported && hitCounts[id] == null && isMinute && !selfRunning && !minuteRunning}
+          cardSize={cardSize}
+          onRun={() => {
+            if (unsupported) {
+              toast(`${marketLabel(market)} 无涨跌停/连板口径，该策略仅支持 A 股`, 'error')
+              return
+            }
+            handleRun(s)
+          }}
+          disabled={unsupported || (run.isPending && activeStrategy === s.id)}
+          onSettings={() => setSettingsStrategyId(s.id)}
+          monitored={strategyMonitorMap.has(`${assetType}:${s.id}`)}
+          onToggleMonitor={() => toggleStrategyMonitor(s.id, s.name)}
+          timeframeBadge={isMinute ? '分钟' : undefined}
+        />
+      </span>
     )
   })
 
@@ -951,6 +974,7 @@ export function Screener() {
       <PageHeader
         title="策略"
         subtitle="基于本地 enriched 表 · 毫秒级 SQL"
+        titleExtra={market !== 'cn' ? <span className="rounded-full border border-border bg-elevated px-2 py-0.5 text-[10px] text-secondary">当前市场：{marketLabel(market)}</span> : null}
         right={
           /* 工具栏 10 组控件总宽会超过标题栏 (窄屏实测溢出 148px)。
              不能靠 overflow-x-auto + 隐藏滚动条 —— 那样右侧按钮被静默裁掉,
@@ -1469,7 +1493,7 @@ export function Screener() {
             toast('AI 策略已保存为草稿，请在策略池「AI」标签发布后使用', 'success')
             return
           }
-          const data = await qc.fetchQuery({ queryKey: [...QK.screenerStrategies('all'), 'all'], queryFn: () => api.screenerStrategies(undefined, 'all'), staleTime: 0 })
+          const data = await qc.fetchQuery({ queryKey: [...QK.screenerStrategies('all', '1d', market), 'all'], queryFn: () => api.screenerStrategies(undefined, 'all', market), staleTime: 0 })
           if (!data.presets.some(s => s.id === id)) {
             throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)
           }
@@ -1486,7 +1510,7 @@ export function Screener() {
         open={showComposite}
         onClose={() => setShowComposite(false)}
         onSavedId={async id => {
-          const data = await qc.fetchQuery({ queryKey: [...QK.screenerStrategies('all'), 'all'], queryFn: () => api.screenerStrategies(undefined, 'all'), staleTime: 0 })
+          const data = await qc.fetchQuery({ queryKey: [...QK.screenerStrategies('all', '1d', market), 'all'], queryFn: () => api.screenerStrategies(undefined, 'all', market), staleTime: 0 })
           addToPool(id)
           // 新建叠加策略为日线时立即扫描, 免去手动点刷新 (分钟策略仍手动单跑)
           const preset = data.presets.find(s => s.id === id)

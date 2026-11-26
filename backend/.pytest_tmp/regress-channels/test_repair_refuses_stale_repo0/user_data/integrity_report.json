@@ -1,0 +1,1 @@
+{"version": 1, "id": "77efffe6ca8549369c2f7d91f7a048bb", "checked_at": "2026-11-23T21:58:00.819485+08:00", "start_date": "2026-10-23", "end_date": "2026-10-29", "lookback_days": 7, "asset_types": ["stock"], "status": "clean", "issues": [], "repairable_count": 0, "uncertain_count": 0, "no_data_assets": [], "data_revisions": {"stock": "0", "etf": "0", "index": "0"}}

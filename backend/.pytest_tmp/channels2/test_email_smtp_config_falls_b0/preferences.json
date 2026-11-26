@@ -1,0 +1,8 @@
+{
+  "email_smtp_config": {
+    "host": " smtp.example.com ",
+    "port": "invalid",
+    "security": "invalid",
+    "to_addresses": "alerts@example.com"
+  }
+}

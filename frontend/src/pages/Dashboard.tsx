@@ -2,10 +2,11 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ArrowUpRight, Check, Database, Gauge, GripVertical, Info, Loader2, Play, RefreshCw, RotateCcw, Sparkles, Timer } from 'lucide-react'
+import { ArrowUpRight, Check, Database, Gauge, GripVertical, Info, Loader2, Play, RefreshCw, RotateCcw, Sparkles } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
-import { api, type AlertEvent, type DataStatus } from '@/lib/api'
+import { api, ApiError, type AlertEvent, type DataStatus, type OverviewMarket } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { useMarket, marketLabel } from '@/lib/market'
 import { DimensionMembersDialog, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { useDataStatus, useCapabilities, useSettings, usePreferences } from '@/lib/useSharedQueries'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -17,8 +18,10 @@ import { scoreColor, quoteAge } from '@/components/dashboard/shared'
 import { DashboardGrid } from '@/components/dashboard/DashboardGrid'
 import { AddWidgetPanel } from '@/components/dashboard/AddWidgetPanel'
 import { useDashboardLayout } from '@/components/dashboard/useDashboardLayout'
-import { DEFAULT_LAYOUT, widgetDef, type WidgetCtx } from '@/components/dashboard/registry'
-import { cloneItems, GRID_COLS, type WidgetType } from '@/components/dashboard/layout'
+import { DEFAULT_LAYOUT, HK_US_LAYOUT, layoutEquals, widgetDef, widgetSupportsMarket, type WidgetCtx } from '@/components/dashboard/registry'
+import { cloneItems, compactLayout, GRID_COLS, type DashboardItem, type WidgetType } from '@/components/dashboard/layout'
+import { AnimatedNumber } from '@/components/motion/AnimatedNumber'
+import { DecodeText } from '@/components/motion/DecodeText'
 
 /** 兼容旧后端的预热标志; 同步/自动修复也会使统计暂不可用。 */
 export function isDataStatusPending(ds?: DataStatus): boolean {
@@ -33,11 +36,21 @@ export function resolveHasNoData(ds?: DataStatus): boolean {
   return (ds.enriched?.trading_days ?? 0) === 0 && (ds.daily?.trading_days ?? 0) === 0
 }
 
+/** 港美股指数条固定首行通栏：其它组件若占了首两行则整体下移，保证指数永不被压盖。 */
+function pinIndexStrip(items: DashboardItem[]): DashboardItem[] {
+  const head: DashboardItem = { i: 'indices', t: 'indices', x: 0, y: 0, w: 12, h: 2 }
+  const rest = items
+    .filter(it => it.t !== 'indices')
+    .map(it => (it.y < head.h ? { ...it, y: it.y + head.h } : it))
+  return [head, ...rest]
+}
+
 /** 打开个股预览的来源榜 (用于行高亮与切股导航列表) */
 type PreviewSource = 'gain' | 'loss' | 'amount' | 'active' | 'concept' | 'industry' | 'alert'
 
 export function Dashboard() {
   const qc = useQueryClient()
+  const { market } = useMarket()
   const [selectedDate, setSelectedDate] = useState<string | undefined>()
   const [manualFetching, setManualFetching] = useState(false)
   const [previewStock, setPreviewStock] = useState<{
@@ -78,12 +91,68 @@ export function Dashboard() {
     refetchInterval: (q: any) => (isDataStatusPending(q.state.data) ? 5_000 : false),
   })
   const overview = useQuery({
-    queryKey: QK.overviewMarket(selectedDate),
-    queryFn: () => api.overviewMarket(selectedDate),
+    queryKey: QK.overviewMarket(selectedDate, market),
+    queryFn: () => api.overviewMarket(selectedDate, market),
     staleTime: 5_000,
-    placeholderData: (prev) => prev,
+    // 同一市场改日期可沿用上一份；跨市场绝不沿用，否则会闪出旧市场数据。
+    placeholderData: (prev) => ((prev?.market ?? 'cn') === market ? prev : undefined),
+    // 容器冷启动预热期间后端返回 503: 保持骨架屏并持续退避重试,
+    // 而不是弹「看板加载失败」——预热完会自然恢复。
+    retry: (count, err) =>
+      err instanceof ApiError && err.status === 503 ? count < 60 : count < 2,
+    retryDelay: (count, err) =>
+      err instanceof ApiError && err.status === 503
+        ? Math.min(err.retryAfterMs ?? 3000, 5000)
+        : Math.min(1000 * 2 ** count, 5000),
   })
-  const data = overview.data
+  // 港美股 overview.indices 为空：指数改走市场指数接口（与指数页同口径）。
+  const marketIndices = useQuery({
+    queryKey: ['market-index-quotes', market, 'dashboard'],
+    queryFn: () => api.marketIndexQuotes(market as 'hk' | 'us'),
+    enabled: market !== 'cn',
+    staleTime: 30_000,
+  })
+  // 市场切换 = 重置式加载：清掉日期/个股预览/板块弹窗，避免跨市场状态串味。
+  useEffect(() => {
+    setSelectedDate(undefined)
+    setPreviewStock(null)
+    setDimensionTarget(null)
+  }, [market])
+  // 旧后端可能没有 market 字段；缺失时按 cn 兼容，但必须确认不是别的市场残留。
+  const overviewData = overview.data
+  const data = overviewData && ((overviewData.market ?? 'cn') === market) ? overviewData : undefined
+
+  // 市场能力 + 数据可用性双重过滤：
+  // - A 股专属模块不进入港美股网格（布局本身仍是一份，切回 A 股原样恢复）；
+  // - 概念/行业暂无榜单数据时整块不渲染（不再展示「未配置数据源」空卡）。
+  const visibleDashItems = useMemo(() => {
+    const hasRank = (rank?: OverviewMarket['concept_rank']) =>
+      (rank?.leading?.length ?? 0) + (rank?.lagging?.length ?? 0) > 0
+    // 未自定义布局时，港美股改用专属满格布局（去除 A 股模块后不留空洞）。
+    const base = market !== 'cn' && layoutEquals(dashItems, DEFAULT_LAYOUT) ? HK_US_LAYOUT : dashItems
+    const filtered = base.filter(it => {
+      if (!widgetSupportsMarket(it.t, market)) return false
+      if (it.t === 'concept-rank' && !hasRank(data?.concept_rank)) return false
+      if (it.t === 'industry-rank' && !hasRank(data?.industry_rank)) return false
+      return true
+    })
+    // 港美股没有 overview.indices，指数条由市场指数接口单独供给：
+    // 强制把 4 大指数钉在首行通栏，保证顶部永远有指数且与上方版面贴合。
+    if (market !== 'cn') return compactLayout(pinIndexStrip(filtered))
+    return compactLayout(filtered)
+  }, [dashItems, market, data])
+  // 网格回写时把可见组件的坐标合并回完整布局，隐藏组件保留原位不丢失。
+  const handleGridItemsChange = useCallback((next: DashboardItem[]) => {
+    const byId = new Map(next.map(i => [i.i, i]))
+    const visibleIds = new Set(visibleDashItems.map(i => i.i))
+    const merged = dashItems
+      .filter(it => !visibleIds.has(it.i) || byId.has(it.i))
+      .map(it => {
+        const changed = byId.get(it.i)
+        return changed ? { ...it, x: changed.x, y: changed.y, w: changed.w, h: changed.h } : it
+      })
+    setDashItems(compactLayout(merged))
+  }, [dashItems, setDashItems, visibleDashItems])
   const caps = useCapabilities()
   const settings = useSettings()
   const hasDepth = !!caps.data?.capabilities?.['depth5.batch']
@@ -147,9 +216,9 @@ export function Dashboard() {
   useEffect(() => {
     if (fetchSucceeded) {
       qc.invalidateQueries({ queryKey: QK.dataStatus })
-      qc.invalidateQueries({ queryKey: QK.overviewMarket(undefined) })
+      qc.invalidateQueries({ queryKey: QK.overviewMarket(undefined, market) })
     }
-  }, [fetchSucceeded, qc])
+  }, [fetchSucceeded, qc, market])
 
   // 组件重新挂载时(从其他页面切回)恢复正在运行的同步任务进度。
   // 原因: fetchJobId 是组件内状态, 切走页面时组件卸载、状态丢失, 切回后进度卡片消失。
@@ -175,24 +244,14 @@ export function Dashboard() {
       })
   }
 
-  if (overview.isLoading && !data) {
-    return (
-      <div className="flex h-full items-center justify-center bg-base">
-        <div className="flex items-center gap-2 text-sm text-muted">
-          <Loader2 className="h-4 w-4 animate-spin" /> 加载市场看板…
-        </div>
-      </div>
-    )
-  }
-
+  // 无当前市场数据 → 骨架屏而不是旧数据占位；切换过程由 Layout 的 market key 转场承接。
   if (!data) {
     return (
-      <div className="flex h-full items-center justify-center bg-base p-6">
-        <div className="rounded-card border border-border bg-surface p-6 text-center">
-          <div className="text-sm text-danger">看板加载失败</div>
-          <button onClick={() => overview.refetch()} className="mt-3 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white">重试</button>
-        </div>
-      </div>
+      <DashboardSkeleton
+        market={market}
+        failed={!overview.isLoading && !overview.isFetching}
+        onRetry={() => overview.refetch()}
+      />
     )
   }
 
@@ -207,6 +266,9 @@ export function Dashboard() {
   // 网格组件渲染上下文: 数据切片 + 交互回调统一由页面层供给
   const widgetCtx: WidgetCtx = {
     data,
+    market,
+    marketIndices: marketIndices.data?.rows,
+    marketIndicesLoading: market !== 'cn' && marketIndices.isLoading,
     score,
     hasDepth,
     sealedReady,
@@ -253,63 +315,81 @@ export function Dashboard() {
       </AnimatePresence>
       {/* 无除权因子能力时的同步前置确认 */}
       {adjGate.dialog}
-      <div className="relative mb-1.5 flex flex-wrap items-center justify-between gap-2 overflow-hidden rounded-card border border-border bg-gradient-to-r from-surface/90 to-surface/70 px-3 py-1.5 shadow-[0_1px_3px_hsl(var(--border)/0.4)] backdrop-blur-sm">
+      <div className="tf-neon-header tf-hud relative mb-1 flex flex-wrap items-center justify-between gap-2 overflow-hidden rounded-card border border-border bg-gradient-to-r from-surface/90 to-surface/70 px-3 py-1.5 backdrop-blur-sm">
         <div className="pointer-events-none absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-accent to-accent/20" aria-hidden />
         <div className="flex items-center gap-2">
           <Gauge className="h-4 w-4 text-accent" />
           <h1 className="text-[16px] leading-6 font-semibold text-foreground">市场看板</h1>
+          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+            market === 'cn' ? 'border-accent/40 bg-accent/10 text-accent'
+              : market === 'hk' ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-400'
+                : 'border-violet-500/40 bg-violet-500/10 text-violet-400'
+          }`}>
+            <DecodeText text={`${marketLabel(market)} · 当前看板`} trigger={market} duration={420} />
+          </span>
           <span
-            className="rounded-full border px-2 py-0.5 text-[10px] font-medium"
+            className="tf-chip-scan relative overflow-hidden rounded-full border px-2 py-0.5 text-[10px] font-medium"
             style={{
               color: scoreColor(score),
               borderColor: `${scoreColor(score)}40`,
               background: `${scoreColor(score)}14`,
             }}
           >
-            {data.emotion.label} · {score}
+            {data.emotion.label} · <AnimatedNumber value={score} resetKey={market} className="tf-num-glow font-mono font-bold" />
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[11px] text-muted">
+        <div className="flex items-center gap-1.5 text-[11px] text-muted">
           {currentDate ? (
             <DatePicker
               value={currentDate}
               onChange={setSelectedDate}
               min={dataStatus.data?.enriched?.earliest_date ?? undefined}
               max={latestDate ?? undefined}
-              className="w-32"
+              className="w-[7.5rem]"
             />
           ) : (
             <span className="font-mono text-secondary">—</span>
           )}
-          <span className="flex items-center gap-1"><Timer className="h-3 w-3" />{quoteAge(data.quote_status?.quote_age_ms)}</span>
-          <span className={quoteRunning ? 'text-accent' : 'text-warning'}>{quoteRunning ? '实时' : '非实时'}</span>
+          <span
+            className={`tf-status-chip ${quoteRunning ? 'is-live' : 'is-idle'}`}
+            title={`行情延迟 ${quoteAge(data.quote_status?.quote_age_ms)}`}
+          >
+            <span className={quoteRunning ? 'tf-live-dot' : 'h-1.5 w-1.5 rounded-full bg-warning'} aria-hidden />
+            <span>{quoteRunning ? '实时' : '非实时'}</span>
+            <span className="tf-status-age font-mono">{quoteAge(data.quote_status?.quote_age_ms)}</span>
+          </span>
           <button
             onClick={handleRefresh}
             disabled={manualFetching}
-            className="inline-flex items-center gap-1 rounded-btn border border-border bg-elevated px-2 py-1 text-[11px] text-secondary transition-colors hover:text-foreground disabled:opacity-50"
+            title="重载行情缓存"
+            aria-label="重载行情缓存"
+            className="tf-icon-btn"
           >
-            <RefreshCw className={`h-3 w-3 ${manualFetching ? 'animate-spin' : ''}`} />重载
+            <RefreshCw className={`h-3.5 w-3.5 ${manualFetching ? 'animate-spin' : ''}`} />
           </button>
           {!dashEditing ? (
             <button
               onClick={() => setDashEditing(true)}
               title="拖拽调整组件位置与宽高"
-              className="inline-flex items-center gap-1 rounded-btn border border-border bg-elevated px-2 py-1 text-[11px] text-secondary transition-colors hover:text-foreground hover:border-accent/40"
+              aria-label="自定义布局"
+              className="tf-icon-btn"
             >
-              <GripVertical className="h-3 w-3" />自定义布局
+              <GripVertical className="h-3.5 w-3.5" />
             </button>
           ) : (
             <>
-              <AddWidgetPanel placedTypes={placedTypes} onAdd={addDashWidget} />
+              <AddWidgetPanel placedTypes={placedTypes} market={market} onAdd={addDashWidget} />
               <button
                 onClick={resetDashLayout}
-                className="inline-flex items-center gap-1 rounded-btn border border-border bg-elevated px-2 py-1 text-[11px] text-secondary transition-colors hover:text-foreground"
+                title="恢复默认布局"
+                aria-label="恢复默认布局"
+                className="tf-icon-btn"
               >
-                <RotateCcw className="h-3 w-3" />恢复默认
+                <RotateCcw className="h-3.5 w-3.5" />
               </button>
               <button
                 onClick={() => setDashEditing(false)}
-                className="inline-flex items-center gap-1 rounded-btn bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-accent/90"
+                className="tf-btn inline-flex items-center gap-1 rounded-btn bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-accent/90"
               >
                 <Check className="h-3 w-3" />完成
               </button>
@@ -330,7 +410,7 @@ export function Dashboard() {
         </div>
       )}
 
-      <DashboardGrid ctx={widgetCtx} items={dashItems} onItemsChange={setDashItems} editing={dashEditing} />
+      <DashboardGrid ctx={widgetCtx} items={visibleDashItems} onItemsChange={handleGridItemsChange} editing={dashEditing} />
 
       <StockPreviewDialog
         symbol={previewStock?.symbol ?? null}
@@ -354,6 +434,43 @@ export function Dashboard() {
           setPreviewStock({ symbol, name })
         }}
       />
+    </div>
+  )
+}
+
+// ===== 市场切换骨架屏 =====
+// 移植 MotionKit Shimmer：浅色扫过替代旧市场数据占位，避免「看到 A 股数字却写着港股」。
+function DashboardSkeleton({ market, failed, onRetry }: {
+  market: 'cn' | 'hk' | 'us'
+  failed: boolean
+  onRetry: () => void
+}) {
+  const cells = [
+    'h-14 col-span-12', 'h-14 col-span-12',
+    'h-52 col-span-3', 'h-52 col-span-3', 'h-52 col-span-3', 'h-52 col-span-3',
+    'h-64 col-span-4', 'h-64 col-span-4', 'h-64 col-span-4',
+    'h-72 col-span-3', 'h-72 col-span-3', 'h-72 col-span-3', 'h-72 col-span-3',
+  ]
+  return (
+    <div className="min-h-full p-1.5">
+      <div className="tf-neon-header mb-1.5 flex h-10 items-center gap-2 rounded-card border border-border bg-surface/70 px-3">
+        <span className={`h-3 w-24 rounded bg-elevated ${failed ? '' : 'tf-shimmer'}`} />
+        <span className={`h-3 w-16 rounded bg-elevated ${failed ? '' : 'tf-shimmer'}`} />
+        <span className="ml-auto text-[11px] text-muted">{failed ? '看板暂不可用' : `${marketLabel(market)}看板载入中…`}</span>
+      </div>
+      <div className="grid grid-cols-12 gap-1.5">
+        {cells.map((cls, i) => (
+          <div key={i} className={`rounded-card border border-border bg-surface/60 ${failed ? '' : 'tf-shimmer'} ${cls}`} />
+        ))}
+      </div>
+      {failed && (
+        <div className="mt-3 flex items-center justify-center gap-3 text-xs text-danger">
+          看板加载失败
+          <button onClick={onRetry} className="rounded-btn border border-border bg-elevated px-3 py-1 text-secondary hover:text-foreground">
+            重试
+          </button>
+        </div>
+      )}
     </div>
   )
 }

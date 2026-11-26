@@ -7,9 +7,18 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app import cache_store
+from app.market_time import in_continuous_session
 from app.services import alert_store
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
+
+_ALERTS_NS = "alerts"
+
+
+def _alerts_ttl() -> int:
+    """盘中 10s / 休市 120s: 布局每 15s 轮询一次, 合并多客户端重复读 jsonl。"""
+    return 10 if in_continuous_session() else 120
 
 
 def _data_dir(request: Request) -> Path:
@@ -32,6 +41,10 @@ def list_alerts(
     ext_columns: 逗号分隔的 "configId.fieldName", 传入后按 symbol 富化行业/概念等 ext 字段,
     每条记录附带 {configId}__{fieldName} 键 (与 watchlist/screener 一致)。
     """
+    cache_key = f"{_data_dir(request)}|{days}:{limit}:{source or ''}:{type or ''}:{ext_columns or ''}"
+    cached = cache_store.get_json(_ALERTS_NS, cache_key)
+    if cached is not None:
+        return cached
     events = alert_store.list_recent(
         _data_dir(request), days=days, limit=limit, source=source, type=type,
     )
@@ -45,13 +58,16 @@ def list_alerts(
         except Exception:  # noqa: BLE001
             pass
     total = alert_store.count(_data_dir(request))
-    return {"alerts": events, "total": total}
+    result = {"alerts": events, "total": total}
+    cache_store.set_json(_ALERTS_NS, cache_key, result, ttl=_alerts_ttl())
+    return result
 
 
 @router.delete("")
 def clear_alerts(request: Request):
     """清空全部触发记录。"""
     n = alert_store.clear(_data_dir(request))
+    cache_store.invalidate_namespace(_ALERTS_NS)
     return {"ok": True, "cleared": n}
 
 
@@ -61,6 +77,7 @@ def delete_alert(ts: int, request: Request):
     deleted = alert_store.delete_one(_data_dir(request), ts)
     if not deleted:
         raise HTTPException(status_code=404, detail="记录不存在")
+    cache_store.invalidate_namespace(_ALERTS_NS)
     return {"ok": True}
 
 

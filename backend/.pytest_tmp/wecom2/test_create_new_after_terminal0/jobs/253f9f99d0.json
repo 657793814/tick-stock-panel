@@ -1,0 +1,1 @@
+{"id": "253f9f99d0", "status": "succeeded", "stage": "init", "progress": 100, "stage_pct": 0, "log": [], "started_at": "2026-11-23T13:56:28Z", "last_progress_at": "2026-11-23T13:56:28Z", "finished_at": "2026-11-23T13:56:28Z", "duration_s": 0.0, "result": {"ok": true}, "error": null, "timeout_s": 5400}

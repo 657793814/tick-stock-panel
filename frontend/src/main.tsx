@@ -10,6 +10,7 @@ import { api, ApiError } from './lib/api'
 import { retryDelay } from './lib/refreshPolicy'
 import { QK } from './lib/queryKeys'
 import { cn } from './lib/cn'
+import { MarketProvider } from './lib/market'
 import * as format from './lib/format'
 import { createAppPersister, shouldPersistQuery, PERSIST_BUSTER } from './lib/queryPersist'
 import { hydrateUiPrefs } from './lib/uiPrefs'
@@ -94,7 +95,9 @@ async function bootstrap() {
           dehydrateOptions: { shouldDehydrateQuery: shouldPersistQuery },
         }}
       >
-        <RouterProvider router={router} />
+        <MarketProvider>
+          <RouterProvider router={router} />
+        </MarketProvider>
       </PersistQueryClientProvider>
     </React.StrictMode>,
   )

@@ -29,6 +29,7 @@ import { cnSignal } from '@/lib/signals'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { startBacktest, stopBacktest, tryReconnect, useBacktestTask } from '@/lib/backtestTask'
+import { useMarket, marketLabel, marketOfSymbol } from '@/lib/market'
 import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
 import { EmptyState } from '@/components/EmptyState'
 import { WarmupBadge } from '@/components/WarmupBadge'
@@ -801,6 +802,7 @@ const StrategyParamInput = memo(function StrategyParamInput({ param, value, onCh
 })
 
 function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: string; onChange: (value: string) => void; assetType?: 'stock' | 'etf' }) {
+  const { market } = useMarket()
   const symbols = useMemo(() => value.split(',').map(s => s.trim()).filter(Boolean), [value])
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -813,14 +815,21 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
     enabled: query.trim().length > 0,
     staleTime: 30_000,
   })
-  const results = search.data?.results ?? []
+  // 回测标的池按全局市场过滤: 搜索与自选导入都不混入其他市场标的
+  const results = useMemo(
+    () => (search.data?.results ?? []).filter(r => marketOfSymbol(r.symbol) === market),
+    [search.data, market],
+  )
   // 自选列表 — 供「从自选导入」一键填入回测范围
   const watchlist = useQuery({
     queryKey: QK.watchlist,
     queryFn: () => api.watchlistList(),
     staleTime: 30_000,
   })
-  const watchlistEntries = watchlist.data?.symbols ?? []
+  const watchlistEntries = useMemo(
+    () => (watchlist.data?.symbols ?? []).filter(entry => marketOfSymbol(entry.symbol) === market),
+    [watchlist.data, market],
+  )
   const watchlistCounts = useMemo(() => {
     // 多组并存: 一股计入每个所属分组
     const counts: Record<string, number> = { ungrouped: 0 }
@@ -977,6 +986,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
 }) {
   const queryClient = useQueryClient()
   const signalNames = useSignalNames()
+  const { market } = useMarket()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
@@ -1105,10 +1115,13 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const loadedStrategyRef = useRef<string | null>(null)
 
   const strategies = useQuery({
-    queryKey: QK.screenerStrategies(assetType, 'all'),
-    queryFn: () => api.screenerStrategies(assetType, 'all'),
+    queryKey: QK.screenerStrategies(assetType, 'all', market),
+    queryFn: () => api.screenerStrategies(assetType, 'all', market),
   })
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
+  // 港美股无涨跌停语义: 涨停/连板类策略不可回测, 选中即把运行按钮拦下
+  const selectedUnsupported = market !== 'cn'
+    && (strategyList.find(st => st.id === selectedStrategy)?.market_supported === false)
   const libraryGroups = useMemo(() => strategyChoiceGroups(strategyList), [strategyList])
   const effectiveLibraryGroup = libraryGroup === 'all' || libraryGroups.some(group => group.id === libraryGroup)
     ? libraryGroup : 'all'
@@ -1256,6 +1269,10 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
 
   const handleRun = (force = false) => {
     if (!selectedStrategy || backtestDataUnavailable) return
+    if (selectedUnsupported) {
+      toast(`${marketLabel(market)} 无涨跌停/连板口径，该策略仅能在 A 股回测`, 'error')
+      return
+    }
     const requestOverrides = detail
       ? normalizeStrategyOverrides(detail, overrides)
       : overrides
@@ -1289,6 +1306,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             ...(regimeMinScore !== '' ? { min_score: Number(regimeMinScore) } : {}),
           }
         : null,
+      market,
       force,
     })
   }
@@ -2130,6 +2148,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
           </div>
         </div>
         )}
+        {simMode === 'position' && market !== 'cn' && (
+        <div className="rounded-btn border border-accent/20 bg-accent/5 px-3 py-2 text-[11px] leading-relaxed text-secondary">
+          <span className="font-medium text-foreground">{marketLabel(market)}回测</span>：
+          标的池按市场校验，混入其他市场标的会被拒绝（{marketLabel(market)}暂不支持全市场回测，请先指定标的）；
+          印花税按后端口径自动覆盖{market === 'hk' ? '（港股买卖双边 0.1%）' : '（美股无印花税）'}；
+          港美股无涨跌停，涨停/连板类策略无法回测。
+        </div>
+        )}
         {simMode === 'position' && (
         <div className="text-[10px] leading-4 text-muted">
           单票目标约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。最大总仓位控制资金投入；剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。
@@ -2162,7 +2188,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
           <div className="flex gap-2">
             <button
               onClick={() => handleRun()}
-              disabled={!selectedStrategy || strategyDetail.isLoading || backtestDataUnavailable}
+              disabled={!selectedStrategy || strategyDetail.isLoading || backtestDataUnavailable || selectedUnsupported}
+              title={selectedUnsupported ? `${marketLabel(market)} 无涨跌停/连板口径，该策略仅能在 A 股回测` : undefined}
               className="group min-w-0 flex-1 inline-flex items-center justify-center gap-2.5 rounded-btn border border-accent/40
                 bg-gradient-to-r from-accent to-blue-500 px-3 py-2.5 text-white shadow-[0_10px_24px_rgba(59,130,246,0.22)]
                 transition-all duration-150 ease-smooth hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(59,130,246,0.28)]
@@ -2175,8 +2202,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             </button>
             <button
               onClick={() => handleRun(true)}
-              disabled={!selectedStrategy || strategyDetail.isLoading || backtestDataUnavailable}
-              title="忽略同参数结果缓存 (保留 5 分钟), 强制重新计算"
+              disabled={!selectedStrategy || strategyDetail.isLoading || backtestDataUnavailable || selectedUnsupported}
+              title={selectedUnsupported ? `${marketLabel(market)} 无涨跌停/连板口径，该策略仅能在 A 股回测` : '忽略同参数结果缓存 (保留 5 分钟), 强制重新计算'}
               className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-btn border border-border
                 bg-surface px-3 py-2.5 text-sm font-medium text-secondary transition-colors duration-150 ease-smooth
                 hover:border-accent/40 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"

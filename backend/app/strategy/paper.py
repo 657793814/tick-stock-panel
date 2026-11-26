@@ -35,11 +35,21 @@ import uuid
 from datetime import date as _date
 from datetime import datetime
 from datetime import time as _time
+from datetime import timedelta as _td
 from pathlib import Path
 
 import polars as pl
 
 from app.market_time import CN_TZ, cn_now, cn_today
+from app.markets import (
+    benchmark_symbol,
+    get_market,
+    lot_size_for,
+    market_of,
+    normalize_symbol,
+    stamp_tax_double_sided,
+    stamp_tax_for,
+)
 from app.parquet import scan_daily_parquet
 from app.services.fs_utils import atomic_write_text
 
@@ -55,6 +65,7 @@ DEFAULT_STAMP_TAX_PCT = 0.001      # 印花税, 仅卖出
 DEFAULT_SLIPPAGE_BPS = 5.0         # 滑点 (bps, 万分之5)
 
 MAX_POSTPONE_DAYS = 3             # 顺延上限: 连续 N 个交易日无法成交自动过期
+SETTLE_CATCHUP_MAX_DAYS = 15      # 补结算最多回看自然日数 (防一次补算太久)
 # 结算价格的打印时刻 (北京墙钟): 开盘价 09:30 / 收盘价 15:00。下单晚于该时刻的单
 # 不能按当日这个价成交 (下单时价格已知), 留到下一交易日结算
 _SESSION_OPEN = _time(9, 30)
@@ -150,7 +161,10 @@ def get_account(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> dict | 
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        acc = json.loads(p.read_text(encoding="utf-8"))
+        # 旧账户无 market 字段 → 视为 cn（只读默认值，不触发写盘）。
+        acc.setdefault("market", "cn")
+        return acc
     except Exception as e:
         logger.warning("paper account load failed: %s", e)
         return None
@@ -162,22 +176,32 @@ def create_account(
     *,
     account_id: str = DEFAULT_ACCOUNT_ID,
     name: str | None = None,
+    market: str = "cn",
     commission_pct: float = DEFAULT_COMMISSION_PCT,
-    stamp_tax_pct: float = DEFAULT_STAMP_TAX_PCT,
+    stamp_tax_pct: float | None = None,
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
     queue_limit_orders: bool = False,
 ) -> dict:
-    """创建账户 (同 id 已存在则原样返回, 不覆盖 — 幂等)。"""
+    """创建账户 (同 id 已存在则原样返回, 不覆盖 — 幂等)。
+
+    market: cn|hk|us。印花税未显式给出时按市场默认（A股卖出单边、港股双边、
+    美股无）—— 历史调用不传 market/stamp_tax_pct 时行为与改造前一致。
+    """
     validate_account_id(account_id)
+    get_market(market)  # 非法市场 fail-closed
     with PAPER_LOCK:
         existing = get_account(data_dir, account_id)
         if existing is not None:
             return existing
         if isinstance(initial_cash, bool) or not isinstance(initial_cash, (int, float)) or initial_cash <= 0:
             raise ValueError("初始资金必须是正数")
+        if stamp_tax_pct is None:
+            # cn 沿用历史默认 0.001, 保证 A 股行为逐位兼容；港美股用市场注册表默认。
+            stamp_tax_pct = DEFAULT_STAMP_TAX_PCT if market == "cn" else stamp_tax_for(market)
         acc = {
             "id": account_id,
             "name": (name or "").strip() or account_id,
+            "market": market,
             "initial_cash": float(initial_cash),
             "cash": float(initial_cash),
             "commission_pct": float(commission_pct),
@@ -295,12 +319,22 @@ def apply_slippage(price: float, side: str, slippage_bps: float) -> float:
     return round(max(adj, 0.01), 4)
 
 
-def buy_fee(qty: int, price: float, commission_pct: float) -> float:
-    return round(max(qty * price * commission_pct, MIN_COMMISSION), 2)
+def buy_fee(
+    qty: int, price: float, commission_pct: float,
+    stamp_tax_pct: float = 0.0, *, market: str = "cn",
+) -> float:
+    """买入费用：佣金双边；港股印花税双边（买入也收），A股/美股买入不收。"""
+    stamp = stamp_tax_pct if stamp_tax_double_sided(market) else 0.0
+    return round(max(qty * price * commission_pct, MIN_COMMISSION) + qty * price * stamp, 2)
 
 
-def sell_fee(qty: int, price: float, commission_pct: float, stamp_tax_pct: float) -> float:
-    return round(max(qty * price * commission_pct, MIN_COMMISSION) + qty * price * stamp_tax_pct, 2)
+def sell_fee(
+    qty: int, price: float, commission_pct: float, stamp_tax_pct: float,
+    *, market: str = "cn",
+) -> float:
+    """卖出费用：佣金双边；A股/港股卖出印花税，美股无印花税。"""
+    stamp = 0.0 if market == "us" else stamp_tax_pct
+    return round(max(qty * price * commission_pct, MIN_COMMISSION) + qty * price * stamp, 2)
 
 
 # ── 涨跌停 (纯函数, 金融口径须测试) ─────────────────────
@@ -327,16 +361,22 @@ def limit_prices(prev_close: float, symbol: str, asset_type: str) -> tuple[float
 
 
 # ── 数量 (纯函数) ───────────────────────────────────────
-def normalize_qty(qty: int) -> int:
-    """下取整到百股整数倍。"""
-    return int(qty // LOT_SIZE) * LOT_SIZE
+def lot_size_for_account(acc: dict | None) -> int:
+    """账户手数：A股/港股 100，美股 1股；旧账户无 market 视为 cn。"""
+    return lot_size_for((acc or {}).get("market", "cn"))
 
 
-def qty_from_amount(amount: float, ref_price: float) -> int:
-    """按金额估算数量: 金额 / 参考价 向下取整到百股 (未计费用, 手续费从现金扣)。"""
+def normalize_qty(qty: int, *, lot_size: int = LOT_SIZE) -> int:
+    """下取整到 lot_size 整数倍（默认 100，保持 A 股旧行为）。"""
+    lot = max(1, int(lot_size))
+    return int(qty // lot) * lot
+
+
+def qty_from_amount(amount: float, ref_price: float, *, lot_size: int = LOT_SIZE) -> int:
+    """按金额估算数量: 金额 / 参考价 向下取整到手 (未计费用)。"""
     if ref_price <= 0:
         return 0
-    return normalize_qty(int(amount / ref_price))
+    return normalize_qty(int(amount / ref_price), lot_size=lot_size)
 
 
 # ── 订单 ────────────────────────────────────────────────
@@ -347,6 +387,23 @@ def load_orders(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> list[di
             out.append(json.loads(f.read_text(encoding="utf-8")))
         except Exception as e:
             logger.warning("paper order load failed %s: %s", f.name, e)
+    return out
+
+
+def recent_orders(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID, limit: int = 3) -> list[dict]:
+    """只读最近 N 个订单文件 (按 mtime), 供跨账户实时流水; 不加载全量。"""
+    files = sorted(
+        _orders_dir(data_dir, account_id).glob("order_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:max(1, limit)]
+    out: list[dict] = []
+    for f in files:
+        try:
+            out.append(json.loads(f.read_text(encoding="utf-8")))
+        except Exception as e:  # noqa: BLE001 — 单文件损坏不影响流水
+            logger.warning("paper recent order load failed %s: %s", f.name, e)
+    out.sort(key=lambda o: o.get("created_at", ""), reverse=True)
     return out
 
 
@@ -397,6 +454,11 @@ def create_order(
         symbol = (symbol or "").strip()
         if not symbol:
             return None, "symbol 不能为空"
+        market = acc.get("market", "cn")
+        # 市场隔离: 账户只允许操作其所属市场的标的 (A股/港股/美股账户分开)
+        sym_market = market_of(symbol)
+        if sym_market != market:
+            return None, f"市场隔离: 标的 {symbol} 属于 {sym_market.upper()}, 账户市场为 {market.upper()}, 已拒绝"
         if asset_type is None:
             asset_type = "etf" if symbol.endswith((".SH", ".SZ")) and symbol.split(".")[0].startswith(("51", "56", "58", "15")) else "stock"
 
@@ -406,21 +468,22 @@ def create_order(
 
         if qty is None and amount is None:
             return None, "qty 与 amount 必须提供一个"
+        lot_size = lot_size_for_account(acc)
         if qty is None:
             if ref_price is None or ref_price <= 0:
                 return None, "amount 模式需要参考价 ref_price"
-            qty = qty_from_amount(float(amount), ref_price)
+            qty = qty_from_amount(float(amount), ref_price, lot_size=lot_size)
             if qty <= 0:
                 return None, f"金额不足以买一手 (参考价 {ref_price})"
         qty = int(qty)
-        if qty <= 0 or qty % LOT_SIZE != 0:
-            return None, f"数量必须是 {LOT_SIZE} 的整数倍"
+        if qty <= 0 or qty % lot_size != 0:
+            return None, f"数量必须是 {lot_size} 的整数倍"
 
         acc_cash = float(acc["cash"])
         if side == "buy":
             # 买入资金预检 (按参考价上界估算, 撮合时二次校验)
             est_price = float(ref_price) if ref_price else 0.0
-            if est_price > 0 and qty * est_price * (1 + acc["slippage_bps"] / 10000) + buy_fee(qty, est_price, acc["commission_pct"]) > acc_cash:
+            if est_price > 0 and qty * est_price * (1 + acc["slippage_bps"] / 10000) + buy_fee(qty, est_price, acc["commission_pct"], acc["stamp_tax_pct"], market=market) > acc_cash:
                 return None, f"可用资金不足 (需约 {qty * est_price:.0f}, 可用 {acc_cash:.0f})"
         else:
             held = sell_capacity(data_dir, symbol, account_id)
@@ -588,7 +651,10 @@ def sell_capacity(
     pos = load_positions(data_dir, account_id).get(symbol)
     if pos is None or pos["qty"] <= 0:
         return None
-    available = _available_of(pos, cn_today().isoformat())
+    available = _available_of(
+        pos, cn_today().isoformat(),
+        market=(get_account(data_dir, account_id) or {}).get("market", "cn"),
+    )
     pending_sell = sum(
         int(o["qty"]) for o in load_orders(data_dir, account_id)
         if o["status"] == "pending" and o["side"] == "sell" and o["symbol"] == symbol
@@ -596,9 +662,12 @@ def sell_capacity(
     return available, pending_sell
 
 
-def _available_of(pos: dict, today: str | None = None) -> int:
-    """T+1 可卖数量: buy_date < today 的批次之和。today 为空则全部可卖 (重建口径)。"""
-    if today is None:
+def _available_of(pos: dict, today: str | None = None, *, market: str = "cn") -> int:
+    """可卖数量。A股 T+1: buy_date < today；港美股 T+0: 当日全额可卖。
+
+    today 为空则全部可卖 (重建口径)。market 默认 cn 保证旧调用行为不变。
+    """
+    if today is None or get_market(market).t_plus == 0:
         return int(sum(lot["qty"] for lot in pos["lots"]))
     return int(sum(lot["qty"] for lot in pos["lots"] if lot["date"] < today))
 
@@ -616,7 +685,7 @@ def _materialize(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> None:
     if acc is not None:
         today = cn_today().isoformat()
         for pos in positions.values():
-            pos["available_qty"] = _available_of(pos, today)
+            pos["available_qty"] = _available_of(pos, today, market=acc.get("market", "cn"))
     atomic_write_text(
         _root(data_dir, account_id) / "positions.json",
         json.dumps({"updated_at": _now_iso(), "positions": positions}, ensure_ascii=False, indent=2),
@@ -633,7 +702,7 @@ def rebuild_positions(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> d
             save_account(data_dir, acc, account_id)
         today = cn_today().isoformat()
         for pos in positions.values():
-            pos["available_qty"] = _available_of(pos, today)
+            pos["available_qty"] = _available_of(pos, today, market=(acc or {}).get("market", "cn"))
         atomic_write_text(
             _root(data_dir, account_id) / "positions.json",
             json.dumps({"updated_at": _now_iso(), "positions": positions}, ensure_ascii=False, indent=2),
@@ -649,22 +718,28 @@ def _fill_order(data_dir: Path, order: dict, raw_price: float, day: str, account
     开 → 转 next_open 排队次日重试 (计顺延, 超限过期)。资金/可卖不足直接过期。
     """
     acc = get_account(data_dir, account_id)
+    market = acc.get("market", "cn")
     symbol, side, qty = order["symbol"], order["side"], int(order["qty"])
     asset_type = order.get("asset_type", "stock")
     price = apply_slippage(raw_price, side, float(acc["slippage_bps"]))
 
-    # 涨跌停检查 (基于上一交易日 raw close; 无上日收盘则跳过检查 — 新股/数据缺失)
-    prev = _prev_close(data_dir, symbol, asset_type, day)
-    if prev is not None:
-        up, down = limit_prices(prev, symbol, asset_type)
-        if side == "buy" and price >= up:
-            _queue_or_expire(data_dir, order, acc, f"触及涨停 {up} 买不进 (模拟)", account_id)
-            return None
-        if side == "sell" and price <= down:
-            _queue_or_expire(data_dir, order, acc, f"触及跌停 {down} 卖不出 (模拟)", account_id)
-            return None
+    # 涨跌停检查仅 A 股（港美股无涨跌停）。基于上一交易日 raw close；无上日收盘跳过。
+    if get_market(market).has_limit:
+        prev = _prev_close(data_dir, symbol, asset_type, day)
+        if prev is not None:
+            up, down = limit_prices(prev, symbol, asset_type)
+            if side == "buy" and price >= up:
+                _queue_or_expire(data_dir, order, acc, f"触及涨停 {up} 买不进 (模拟)", account_id)
+                return None
+            if side == "sell" and price <= down:
+                _queue_or_expire(data_dir, order, acc, f"触及跌停 {down} 卖不出 (模拟)", account_id)
+                return None
 
-    fee = buy_fee(qty, price, acc["commission_pct"]) if side == "buy" else sell_fee(qty, price, acc["commission_pct"], acc["stamp_tax_pct"])
+    fee = (
+        buy_fee(qty, price, acc["commission_pct"], acc["stamp_tax_pct"], market=market)
+        if side == "buy"
+        else sell_fee(qty, price, acc["commission_pct"], acc["stamp_tax_pct"], market=market)
+    )
     gross = qty * price
     if side == "buy":
         if gross + fee > float(acc["cash"]) + 1e-6:
@@ -685,7 +760,7 @@ def _fill_order(data_dir: Path, order: dict, raw_price: float, day: str, account
             return None
     if side == "sell":
         pos = load_positions(data_dir, account_id).get(symbol)
-        avail = _available_of(pos, day) if pos else 0
+        avail = _available_of(pos, day, market=market) if pos else 0
         if pos is None or pos["qty"] < qty or avail < qty:
             _expire(data_dir, order, f"可卖数量不足 (T+1): 可卖 {avail}", account_id)
             return None
@@ -883,15 +958,62 @@ def _prev_close(data_dir: Path, symbol: str, asset_type: str, day: str) -> float
     return float(df["close"][0])
 
 
-def _index_close(data_dir: Path, day: str) -> float | None:
-    """沪深300 当日 raw close (基准对比); 指数日K缺失返回 None。"""
-    base = data_dir / "kline_index_daily"
+def latest_closes(data_dir: Path, symbols_by_type: dict[str, list[str]]) -> dict[str, dict]:
+    """批量取标的最新两个交易日 raw close (实时行情不可用时的展示兜底)。
+
+    返回 {symbol: {"close": 最新收盘, "change_pct": 较前一交易日涨跌幅(百分数)}}。
+    单类资产扫描失败只跳过该类, 不影响其他; 无数据标的自然缺失。
+    """
+    out: dict[str, dict] = {}
+    for asset_type, symbols in symbols_by_type.items():
+        wanted = sorted({s for s in symbols if s})
+        if not wanted:
+            continue
+        base = _daily_path(data_dir, asset_type)
+        if not base.exists():
+            continue
+        try:
+            df = (
+                scan_daily_parquet((base / "**" / "*.parquet").as_posix())
+                .filter(pl.col("symbol").is_in(wanted))
+                .select("symbol", "date", "close")
+                .sort(["symbol", "date"])
+                .group_by("symbol")
+                .agg(pl.col("close").tail(2))
+                .collect()
+            )
+        except Exception as e:  # noqa: BLE001 — 展示兜底, 失败即缺失
+            logger.warning("paper latest_closes failed (%s): %s", asset_type, e)
+            continue
+        for row in df.to_dicts():
+            closes = [c for c in (row.get("close") or []) if c is not None]
+            if not closes:
+                continue
+            last = float(closes[-1])
+            prev = float(closes[-2]) if len(closes) > 1 and closes[-2] else None
+            out[str(row["symbol"])] = {
+                "close": last,
+                "change_pct": (last / prev - 1) * 100 if prev else None,
+            }
+    return out
+
+
+def _index_close(data_dir: Path, day: str, market: str = "cn") -> float | None:
+    """账户市场基准指数当日 raw close；指数日K或基准缺失返回 None。
+
+    cn → 000300.SH (kline_index_daily)；hk → HSI / us → SPX
+    (kline_index_daily_{market})。基准名由 markets.benchmark_symbol 单一权威给出。
+    """
+    symbol = benchmark_symbol(market)
+    if symbol is None:
+        return None
+    base = data_dir / ("kline_index_daily" if market == "cn" else f"kline_index_daily_{market}")
     if not base.exists():
         return None
     try:
         df = (
             scan_daily_parquet((base / "**" / "*.parquet").as_posix())
-            .filter((pl.col("symbol") == "000300.SH") & (pl.col("date") == _date.fromisoformat(day)))
+            .filter((pl.col("symbol") == symbol) & (pl.col("date") == _date.fromisoformat(day)))
             .select("close")
             .collect()
         )
@@ -1020,7 +1142,7 @@ def settle_day(data_dir: Path, day: str, account_id: str = DEFAULT_ACCOUNT_ID) -
         # 定版净值 (幂等: 重写当日行); 顺带记录沪深300 收盘作基准对比
         nav = daily_nav(data_dir, day, account_id=account_id)
         if nav is not None:
-            benchmark = _index_close(data_dir, day)
+            benchmark = _index_close(data_dir, day, market=acc.get("market", "cn"))
             if benchmark is not None:
                 nav["benchmark_close"] = benchmark
             _write_nav_line(data_dir, day, nav, account_id)
@@ -1028,16 +1150,154 @@ def settle_day(data_dir: Path, day: str, account_id: str = DEFAULT_ACCOUNT_ID) -
     return summary
 
 
+# ── 补结算 (漏结算的交易日回放) ──────────────────────────
+def _settleable_days(data_dir: Path, start: _date, end: _date) -> list[_date]:
+    """[start, end] 内本地已有日K分区的自然日 — 只在这些日子撮合。
+
+    分区只在真正落过行情数据的交易日才存在, 用它当「交易日历」可避免在周末/节假日
+    结算, 否则顺延计数 (MAX_POSTPONE_DAYS) 会被非交易日白白耗掉。
+    """
+    days: list[_date] = []
+    day = start
+    while day <= end:
+        tag = f"date={day.isoformat()}"
+        if any((Path(data_dir) / sub / tag).is_dir() for sub in ("kline_daily", "kline_etf_daily")):
+            days.append(day)
+        day += _td(days=1)
+    return days
+
+
+def settle_pending_days(
+    data_dir: Path, until_day, account_id: str = DEFAULT_ACCOUNT_ID,
+    max_lookback_days: int = SETTLE_CATCHUP_MAX_DAYS,
+) -> dict:
+    """结算到 until_day, 并补上此前漏结算的交易日 (幂等)。
+
+    盘后管道只在当天调一次 settle_day: 进程停机、管道在日K阶段失败、或任务被单飞/
+    重任务槽挡掉, 那一整天就没有人撮合 —— 顺延单 (next_open/close) 会一直挂 pending,
+    页面上表现为「全是待成交」。这里从「上次定版净值日 + 1」或「最早待成交单的下单日」
+    起, 逐日重放到 until_day; settle_day 本身幂等 (订单状态 + corp_action 台账守卫),
+    重放不会重复成交也不会二次除权。
+
+    返回 settle_day 同名字段 + settled_days (实际结算的日期, 升序)。
+    """
+    end = _date.fromisoformat(until_day) if isinstance(until_day, str) else until_day
+    summary: dict = {"filled": 0, "expired": 0, "corp_actions": 0, "nav": None,
+                     "account": account_id, "settled_days": []}
+    if get_account(data_dir, account_id) is None:
+        return summary
+
+    anchors: list[_date] = []
+    nav_days = [n.get("date") for n in load_nav(data_dir, account_id) if n.get("date")]
+    if nav_days:
+        anchors.append(_date.fromisoformat(max(nav_days)) + _td(days=1))
+    pending_days = [
+        _date.fromisoformat(str(o.get("created_at", ""))[:10])
+        for o in load_orders(data_dir, account_id) if o.get("status") == "pending"
+    ]
+    if pending_days:
+        anchors.append(min(pending_days))
+    start = min(anchors) if anchors else end
+    start = max(start, end - _td(days=max(1, int(max_lookback_days))))
+
+    for day in _settleable_days(data_dir, start, end):
+        s = settle_day(data_dir, day.isoformat(), account_id=account_id)
+        summary["filled"] += s.get("filled", 0)
+        summary["expired"] += s.get("expired", 0)
+        summary["corp_actions"] += s.get("corp_actions", 0)
+        if s.get("nav") is not None:
+            summary["nav"] = s["nav"]
+        summary["settled_days"].append(day.isoformat())
+    return summary
+
+
 # ── 净值与总览 ──────────────────────────────────────────
 def latest_prices_from_daily(data_dir: Path, day: str, account_id: str = DEFAULT_ACCOUNT_ID) -> dict[str, float]:
-    """day 收盘后各持仓标的 raw_close (定版用)。"""
+    """day 收盘后各持仓标的 raw_close (定版用)。
+
+    按资产类型分组, 每个类型只扫一次 date=day 分区; 之前的实现逐标的扫全量
+    分区, 持仓多时会把总览/对比拖到数秒级。
+    """
+    positions = load_positions(data_dir, account_id)
+    groups: dict[str, list[str]] = {}
+    for symbol, pos in positions.items():
+        if pos["qty"] > 0:
+            groups.setdefault(pos.get("asset_type", "stock"), []).append(symbol)
     out: dict[str, float] = {}
-    for symbol, pos in load_positions(data_dir, account_id).items():
-        if pos["qty"] <= 0:
+    for asset_type, symbols in groups.items():
+        out.update(_closes_on_day(data_dir, asset_type, symbols, day))
+    return out
+
+
+def _closes_on_day(data_dir: Path, asset_type: str, symbols: list[str], day: str) -> dict[str, float]:
+    """单次扫描读取某资产类型在 day 的收盘价 (缺失标的不在结果里)。"""
+    base = _daily_path(data_dir, asset_type)
+    if not symbols or not base.exists():
+        return {}
+    day_dir = base / f"date={day}"
+    if not day_dir.is_dir():
+        # 兼容无 date= 分区的旧数据布局: 回落到逐标的读取
+        out: dict[str, float] = {}
+        for symbol in symbols:
+            bar = read_daily_bar(data_dir, symbol, asset_type, day)
+            if bar is not None:
+                out[symbol] = bar["close"]
+        return out
+    try:
+        df = (
+            scan_daily_parquet((day_dir / "*.parquet").as_posix())
+            .filter(pl.col("symbol").is_in(symbols))
+            .select(["symbol", "close"])
+            .collect()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("paper closes_on_day failed %s %s: %s", asset_type, day, e)
+        return {}
+    return {str(r["symbol"]): float(r["close"]) for r in df.to_dicts() if r.get("close") is not None}
+
+
+def latest_mark_day(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> str:
+    """总览估值使用的行情日: 定版净值日与本地最新日K分区取较新者。
+
+    只用净值日会让「结算后又建仓」的标的缺价、按成本计; 取较新日K可反映最新
+    收盘, 同时仍以本地已落盘数据为准 (盘后落盘, 不会取到盘中半截数据)。
+    """
+    candidates: list[str] = []
+    nav = load_nav(data_dir, account_id)
+    if nav:
+        last = nav[-1].get("date")
+        if last:
+            candidates.append(str(last))
+    candidates.append(latest_data_day(data_dir))
+    return max(candidates)
+
+
+def latest_data_day(data_dir: Path) -> str:
+    """本地日K最新分区日 (多账户对比共用同一估值日)。"""
+    for asset_type in ("stock", "etf"):
+        base = _daily_path(data_dir, asset_type)
+        if not base.exists():
             continue
-        bar = read_daily_bar(data_dir, symbol, pos.get("asset_type", "stock"), day)
-        if bar is not None:
-            out[symbol] = bar["close"]
+        days = sorted(p.name.split("=", 1)[-1] for p in base.glob("date=*") if p.is_dir())
+        if days:
+            return days[-1]
+    return cn_today().isoformat()
+
+
+def prices_for_accounts(data_dir: Path, account_ids: list[str], day: str) -> dict[str, float]:
+    """一次读取多账户持仓在 day 的收盘价 (各资产类型只扫一次分区)。
+
+    /compare 逐账户调 overview 时若各自扫盘, 账户一多就是几十次全分区扫描;
+    这里先并集标的再一次取价, 对比接口保持秒级。
+    """
+    by_type: dict[str, set[str]] = {}
+    for account_id in account_ids:
+        for symbol, pos in load_positions(data_dir, account_id).items():
+            if pos["qty"] > 0:
+                by_type.setdefault(pos.get("asset_type", "stock"), set()).add(symbol)
+    out: dict[str, float] = {}
+    for asset_type, symbols in by_type.items():
+        out.update(_closes_on_day(data_dir, asset_type, sorted(symbols), day))
     return out
 
 
@@ -1093,19 +1353,39 @@ def load_nav(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> list[dict]
     return out
 
 
-def overview(data_dir: Path, price_map: dict[str, float] | None = None, account_id: str = DEFAULT_ACCOUNT_ID) -> dict:
-    """总览 (盘中实时估算): 现金 + 持仓市值 + 估算净值。"""
+def overview(
+    data_dir: Path,
+    price_map: dict[str, float] | None = None,
+    account_id: str = DEFAULT_ACCOUNT_ID,
+    *,
+    estimating: bool | None = None,
+    price_date: str | None = None,
+) -> dict:
+    """总览: 现金 + 持仓市值 + 估算净值。
+
+    price_map 为空时必须回落「最近收盘价」(而不是成本价): 否则持仓市值等于
+    成本、总资产永远贴着初始资金, 与已实现盈亏/净值曲线互相矛盾。
+
+    estimating/price_date 允许调用方显式标注口径: 批量对比时价格由外部一次
+    取好传入, 但并非盘中实时快照, 不能误标成「估」。
+    """
     acc = get_account(data_dir, account_id)
     if acc is None:
         return {"initialized": False}
     positions = load_positions(data_dir, account_id)
     today = cn_today().isoformat()
+    is_live = estimating if estimating is not None else price_map is not None
+    if price_map is not None:
+        prices = price_map
+    else:
+        price_date = price_date or latest_mark_day(data_dir, account_id)
+        prices = latest_prices_from_daily(data_dir, price_date, account_id)
     holdings = []
     mv = 0.0
     for symbol, pos in sorted(positions.items()):
         if pos["qty"] <= 0:
             continue
-        price = (price_map or {}).get(symbol)
+        price = prices.get(symbol)
         last = price if price is not None else pos["avg_cost"]
         mv += pos["qty"] * last
         holdings.append({
@@ -1117,12 +1397,13 @@ def overview(data_dir: Path, price_map: dict[str, float] | None = None, account_
             "market_value": round(pos["qty"] * last, 2),
             "pnl": round(pos["qty"] * (last - pos["avg_cost"]), 2),
             "pnl_pct": round((last / pos["avg_cost"] - 1) * 100, 2) if pos["avg_cost"] else 0.0,
-            "available_qty": _available_of(pos, today),
+            "available_qty": _available_of(pos, today, market=acc.get("market", "cn")),
         })
     return {
         "initialized": True,
         "account_id": account_id,
         "account_name": acc.get("name", account_id),
+        "market": acc.get("market", "cn"),
         "status": acc["status"],
         "queue_limit_orders": bool(acc.get("queue_limit_orders")),
         "cash": round(float(acc["cash"]), 2),
@@ -1130,7 +1411,8 @@ def overview(data_dir: Path, price_map: dict[str, float] | None = None, account_
         "total": round(float(acc["cash"]) + mv, 2),
         "total_pnl": round(float(acc["cash"]) + mv - float(acc["initial_cash"]), 2),
         "initial_cash": float(acc["initial_cash"]),
-        "estimating": price_map is not None,
+        "estimating": is_live,
+        "price_date": None if is_live else price_date,
         "holdings": holdings,
     }
 
@@ -1172,6 +1454,286 @@ def round_trips(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> list[di
                 pool.pop(0)
             remain -= take
     return rounds
+
+
+# ── 成交回放 (只读读模型) ───────────────────────────────
+_REASON_LABELS = {
+    "signal": "策略信号",
+    "max_hold": "持有到期",
+    "stop_loss": "止损",
+    "take_profit": "止盈",
+    "trailing_stop": "移动止损",
+    "trailing_take_profit": "移动止盈",
+    "rebalance": "调仓",
+    "manual": "手动",
+    "auto": "规则跟单",
+}
+
+
+def _execution_state_path(data_dir: Path, account_id: str) -> Path:
+    return Path(data_dir) / "user_data" / "extensions" / "paper_execution" / f"{validate_account_id(account_id)}.json"
+
+
+def load_execution_meta(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> dict | None:
+    """读取账户绑定的策略快照摘要 (回放展示用; 缺失/损坏返回 None, 不影响台账)。"""
+    p = _execution_state_path(data_dir, account_id)
+    if not p.exists():
+        return None
+    try:
+        state = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 — 扩展文件可能被手工修改, 只做展示降级
+        logger.warning("paper execution state load failed: %s", e)
+        return None
+    if not isinstance(state, dict):
+        return None
+    snap = state.get("snapshot")
+    if not isinstance(snap, dict):
+        snap = {}
+    return {
+        "strategy_id": snap.get("strategy_id"),
+        "name": snap.get("name") or snap.get("strategy_id"),
+        "source": snap.get("source"),
+        "enabled": bool(state.get("enabled")),
+        "status": state.get("status"),
+        "bound_at": state.get("bound_at"),
+    }
+
+
+def _event_by_order(data_dir: Path, account_id: str) -> dict[str, dict]:
+    """执行扩展里的事件按 order_id 建索引 (reason/message 比 order.source 更可读)。"""
+    p = _execution_state_path(data_dir, account_id)
+    if not p.exists():
+        return {}
+    try:
+        state = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 扩展状态可能损坏, 回放降级为无原因
+        return {}
+    events = state.get("events") if isinstance(state, dict) else None
+    if not isinstance(events, list):
+        return {}
+    out: dict[str, dict] = {}
+    for event in events:
+        if isinstance(event, dict) and event.get("order_id"):
+            out[str(event["order_id"])] = event
+    return out
+
+
+def _fill_reason(source: str | None, event: dict | None) -> str | None:
+    """从订单来源/执行事件解析可展示的原因码。解析不到保留 None。"""
+    if event and event.get("reason"):
+        return str(event["reason"])
+    src = str(source or "")
+    if src.startswith("strategy-exec:"):
+        parts = src.split(":", 2)
+        return parts[2] if len(parts) > 2 and parts[2] else "signal"
+    if src.startswith("auto:"):
+        return "auto"
+    if src == "manual":
+        return "manual"
+    return None
+
+
+def _reason_label(reason: str | None, side: str, source: str | None) -> str:
+    if reason == "signal":
+        return "策略买入" if side == "buy" else "策略卖出"
+    if reason in _REASON_LABELS:
+        return _REASON_LABELS[reason]
+    if reason:
+        return reason
+    src = str(source or "")
+    if src.startswith("strategy-exec:"):
+        return "策略买入" if side == "buy" else "策略卖出"
+    if src.startswith("auto:"):
+        return "规则跟单"
+    return "成交"
+
+
+def _date_in_range(day: str, start: str | None, end: str | None) -> bool:
+    return not ((start and day < start) or (end and day > end))
+
+
+def replay_symbols(
+    data_dir: Path,
+    account_id: str = DEFAULT_ACCOUNT_ID,
+    *,
+    names: dict[str, str] | None = None,
+) -> list[dict]:
+    """账户成交过的标的摘要 (回放弹窗列表)。只统计真实成交, 不含除权行。"""
+    fills = [f for f in load_fills(data_dir, account_id) if f.get("kind", "fill") == "fill"]
+    if not fills:
+        return []
+    pnl_by_symbol: dict[str, float] = {}
+    for r in round_trips(data_dir, account_id):
+        pnl_by_symbol[r["symbol"]] = pnl_by_symbol.get(r["symbol"], 0.0) + float(r["pnl"])
+    grouped: dict[str, list[dict]] = {}
+    for f in fills:
+        grouped.setdefault(f["symbol"], []).append(f)
+    out: list[dict] = []
+    for symbol, items in grouped.items():
+        items.sort(key=lambda f: (f.get("date", ""), int(f.get("seq", 0))))
+        dates = [str(f.get("date", "")) for f in items if f.get("date")]
+        buys = sum(1 for f in items if f.get("side") == "buy")
+        sells = sum(1 for f in items if f.get("side") == "sell")
+        out.append({
+            "symbol": symbol,
+            "name": (names or {}).get(symbol) or symbol,
+            "asset_type": items[-1].get("asset_type", "stock"),
+            "market": market_of(symbol),
+            "fills": len(items),
+            "buys": buys,
+            "sells": sells,
+            "first_date": min(dates) if dates else None,
+            "last_date": max(dates) if dates else None,
+            "last_side": items[-1].get("side"),
+            "realized_pnl": round(pnl_by_symbol.get(symbol, 0.0), 2),
+        })
+    out.sort(key=lambda r: (r.get("last_date") or "", r["symbol"]), reverse=True)
+    return out
+
+
+def replay(
+    data_dir: Path,
+    symbol: str,
+    account_id: str = DEFAULT_ACCOUNT_ID,
+    *,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 500,
+    names: dict[str, str] | None = None,
+) -> dict | None:
+    """单标的成交回放读模型。返回 None 表示该账户没有此标的成交。
+
+    - `fills` 只含真实成交; `corp_actions` 单独列出, marker 里转成 neutral。
+    - `summary.realized_pnl` 只统计平仓日落在 [start, end] 的 FIFO 回合。
+    - `limit` 截断最近成交; 汇总仍按完整区间计算。
+    """
+    symbol = normalize_symbol(symbol)
+    all_fills = load_fills(data_dir, account_id)
+    if not any(
+        f.get("symbol") == symbol and f.get("kind", "fill") == "fill" for f in all_fills
+    ):
+        return None
+
+    limit = max(1, min(int(limit), 2000))
+    orders = {str(o["id"]): o for o in load_orders(data_dir, account_id)}
+    events = _event_by_order(data_dir, account_id)
+    meta = load_execution_meta(data_dir, account_id)
+
+    in_range = [
+        f for f in all_fills
+        if f.get("symbol") == symbol and _date_in_range(str(f.get("date", "")), start, end)
+    ]
+    real_fills = [f for f in in_range if f.get("kind", "fill") == "fill"]
+    corp_actions = [f for f in in_range if f.get("kind") == "corp_action"]
+    total_fills = len(real_fills)
+    truncated = total_fills > limit
+    visible_fills = real_fills[-limit:] if truncated else real_fills
+
+    def _fill_row(f: dict) -> dict:
+        order = orders.get(str(f.get("order_id"))) if f.get("order_id") else None
+        source = (order or {}).get("source")
+        event = events.get(str(f.get("order_id"))) if f.get("order_id") else None
+        reason = _fill_reason(source, event)
+        return {
+            "seq": f.get("seq"),
+            "date": f.get("date"),
+            "side": f.get("side"),
+            "qty": int(f.get("qty") or 0),
+            "price": float(f.get("price") or 0),
+            "fee": float(f.get("fee") or 0),
+            "asset_type": f.get("asset_type", "stock"),
+            "order_id": f.get("order_id"),
+            "source": source,
+            "reason": reason,
+            "reason_label": _reason_label(reason, str(f.get("side") or ""), source),
+        }
+
+    fills_out = [_fill_row(f) for f in visible_fills]
+
+    markers: list[dict] = []
+    for f in visible_fills:
+        side = str(f.get("side") or "")
+        row = _fill_row(f)
+        markers.append({
+            "date": f.get("date"),
+            "kind": "buy" if side == "buy" else "sell",
+            "label": "B" if side == "buy" else "S",
+            "above": side == "sell",
+            "price": row["price"],
+            "qty": row["qty"],
+            "side": side,
+            "reason": row["reason"],
+            "reason_label": row["reason_label"],
+            "order_id": f.get("order_id"),
+        })
+    for f in corp_actions:
+        markers.append({
+            "date": f.get("date"),
+            "kind": "neutral",
+            "label": "权",
+            "above": True,
+            "factor": f.get("factor"),
+            "reason": "corp_action",
+            "reason_label": "除权调整",
+        })
+    markers.sort(key=lambda m: (str(m.get("date") or ""), 0 if m.get("kind") == "buy" else 1))
+
+    buys = [f for f in real_fills if f.get("side") == "buy"]
+    sells = [f for f in real_fills if f.get("side") == "sell"]
+    rounds = [
+        r for r in round_trips(data_dir, account_id)
+        if r["symbol"] == symbol and _date_in_range(str(r["close_date"]), start, end)
+    ]
+    wins = [r for r in rounds if r["pnl"] > 0]
+
+    # 期末持仓: 用截至 end 的完整台账重放 (含区间前建仓与除权), 不能只看区间内成交。
+    upto = [
+        f for f in all_fills
+        if f.get("symbol") == symbol and (not end or str(f.get("date", "")) <= end)
+    ]
+    positions, _cash = replay_positions(data_dir, fills=upto, account_id=account_id)
+    open_qty = int(positions.get(symbol, {}).get("qty", 0))
+
+    return {
+        "account": account_id,
+        "account_name": (get_account(data_dir, account_id) or {}).get("name", account_id),
+        "symbol": symbol,
+        "name": (names or {}).get(symbol) or symbol,
+        "asset_type": (visible_fills[-1].get("asset_type") if visible_fills else "stock"),
+        "market": market_of(symbol),
+        "start": start,
+        "end": end,
+        "strategy": meta,
+        "fills": fills_out,
+        "corp_actions": [
+            {
+                "date": f.get("date"),
+                "factor": f.get("factor"),
+                "qty_before": f.get("qty_before"),
+                "cost_before": f.get("cost_before"),
+            }
+            for f in corp_actions
+        ],
+        "markers": markers,
+        "summary": {
+            "buys": len(buys),
+            "sells": len(sells),
+            "buy_amount": round(sum(float(f.get("price") or 0) * int(f.get("qty") or 0) for f in buys), 2),
+            "sell_amount": round(sum(float(f.get("price") or 0) * int(f.get("qty") or 0) for f in sells), 2),
+            "fees": round(sum(float(f.get("fee") or 0) for f in real_fills), 2),
+            "realized_pnl": round(sum(float(r["pnl"]) for r in rounds), 2),
+            "win_rate": round(len(wins) / len(rounds) * 100, 2) if rounds else None,
+            "avg_holding_days": (
+                round(sum(float(r["holding_days"]) for r in rounds) / len(rounds), 1)
+                if rounds else None
+            ),
+            "open_qty": open_qty,
+            "rounds": len(rounds),
+            "corp_actions": len(corp_actions),
+        },
+        "total_fills": total_fills,
+        "truncated": truncated,
+    }
 
 
 def max_drawdown(nav_values: list[float]) -> float | None:

@@ -1,0 +1,6 @@
+{
+  "id": "uf_hot",
+  "kind": "custom",
+  "label": "热度",
+  "formula": "ext_tags_hot * 2"
+}

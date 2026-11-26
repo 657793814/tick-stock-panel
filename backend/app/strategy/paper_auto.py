@@ -14,6 +14,7 @@ paper_auto.on_rule_events → paper.create_order(source=f"auto:{rule_id}")。
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import uuid
@@ -277,6 +278,117 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
                     continue
                 created.append(order)
                 logger.info("paper auto %s: %s 触发 %s %d 股 (%s)", rule["name"], symbol, side, qty, order["id"])
+    return created
+
+
+def _strategy_exit_consts(data_dir: Path, strategy_id: str) -> tuple[float | None, int | None]:
+    """从策略文件 AST 读取 STOP_LOSS / MAX_HOLD_DAYS 常量 (不执行模块)。
+
+    迁移自 quantjourney-bt 的 order 类策略原版带止损/持有期语义; 用 AST 只取
+    顶层常量赋值, 不触发策略安全校验, 文件缺失/解析失败返回 (None, None)。
+    """
+    path = data_dir / "strategies" / "custom" / f"{strategy_id}.py"
+    if not path.exists():
+        return None, None
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return None, None
+    stop_loss: float | None = None
+    max_hold: int | None = None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            value = node.value
+            # 负数字面量是 ast.UnaryOp(USub, Constant), 先剥符号再取值
+            sign = 1.0
+            if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+                sign = -1.0
+                value = value.operand
+            if not isinstance(value, ast.Constant):
+                continue
+            if target.id == "STOP_LOSS" and isinstance(value.value, (int, float)):
+                stop_loss = sign * float(value.value)
+            elif target.id == "MAX_HOLD_DAYS" and isinstance(value.value, int) and sign > 0:
+                max_hold = int(value.value)
+    return stop_loss, max_hold
+
+
+def run_exit_sweep(
+    data_dir: Path,
+    snapshot: dict[str, float],
+    account_id: str = paper.DEFAULT_ACCOUNT_ID,
+) -> list[dict]:
+    """风控出场扫描: 按跟单策略的 STOP_LOSS / MAX_HOLD_DAYS 全平触发标的。
+
+    背景: 迁移的 order 类策略改写成信号策略后 EXIT_SIGNALS=[] 只剩入场信号,
+    模拟盘会只买不卖。本扫描作为兜底风控 —— 持仓浮亏 ≤ STOP_LOSS 或持有天数
+    ≥ MAX_HOLD_DAYS 时按规则的 order_type 全平 (next_open 单次日开盘成交)。
+    与信号出场 (EXIT_SIGNALS → sell_signal) 互补; 风控出场不受冷却限制。
+    """
+    created: list[dict] = []
+    rules = load_auto_rules(data_dir, account_id, enabled_only=True)
+    positions = {
+        s: p for s, p in paper.load_positions(data_dir, account_id).items()
+        if p["qty"] > 0
+    }
+    if not rules or not positions:
+        return created
+    today = cn_now().date()
+    seen_strategies: set[str] = set()
+    with paper.PAPER_LOCK:
+        for rule in rules:
+            if rule.get("match_kind") != "strategy":
+                continue
+            strategy_id = str(rule.get("match_id") or "")
+            if not strategy_id or strategy_id in seen_strategies:
+                continue
+            seen_strategies.add(strategy_id)
+            stop_loss, max_hold = _strategy_exit_consts(data_dir, strategy_id)
+            if stop_loss is None and max_hold is None:
+                continue
+            for symbol, pos in positions.items():
+                price = snapshot.get(symbol)
+                if not price or price <= 0:
+                    continue
+                reason = ""
+                if stop_loss is not None and pos.get("avg_cost"):
+                    pnl = float(price) / float(pos["avg_cost"]) - 1
+                    if pnl <= stop_loss:
+                        reason = f"止损触发 {pnl:.2%} ≤ {stop_loss:.2%}"
+                if not reason and max_hold is not None:
+                    lot_dates = [
+                        str(l.get("date")) for l in (pos.get("lots") or []) if l.get("date")
+                    ]
+                    if lot_dates:
+                        held_days = (today - _date.fromisoformat(min(lot_dates))).days
+                        if held_days >= max_hold:
+                            reason = f"持有到期 {held_days}d ≥ {max_hold}d"
+                if not reason:
+                    continue
+                cap = paper.sell_capacity(data_dir, symbol, account_id)
+                if cap is None:
+                    continue
+                available, pending_sell = cap
+                qty = paper.normalize_qty(min(int(pos["qty"]), available - pending_sell))
+                if qty <= 0:
+                    continue
+                order, err = paper.create_order(
+                    data_dir, symbol, "sell",
+                    account_id=account_id,
+                    qty=qty,
+                    order_type=rule.get("order_type", "market"),
+                    ref_price=float(price),
+                    source=f"auto:sweep:{rule['id']}",
+                )
+                if err:
+                    logger.info("paper exit sweep %s: %s 卖出被拒: %s", rule["name"], symbol, err)
+                    continue
+                created.append(order)
+                logger.info("paper exit sweep %s: %s 风控卖出 %d 股 (%s)", rule["name"], symbol, qty, reason)
     return created
 
 

@@ -193,6 +193,38 @@
 
 设置 → 菜单设置里每个页面带 `核心 / 扩展` 架构徽标与 `内置 / 自定义 / 扩展` 类型徽标;11 个官方页面(概念/行业/个股/财务分析、监控中心、异动、持仓提醒、模拟盘、信号库、复盘、连板梯队)已全部落地为 `frontend/src/custom/<ns>/extension.tsx` **单文件扩展** —— 删除目录即卸载、复制目录即导入;例如监控中心页面可换,规则引擎与推送管道属核心照常运行。新装默认隐藏这些扩展页面(菜单设置一键开启),老用户升级自动保持原菜单位置与排序。免宿主重建的运行时分发走**页面插件**(设置 → 页面插件,契约见 [docs/page-sdk.md](./docs/page-sdk.md))。详见 [docs/open-platform-plan.md](./docs/open-platform-plan.md)。
 
+### 多市场扩展 · 港美股能力复刻
+
+> 依据同 workspace 的 `tickflow-stock-panel`（多市场 fork: A 股 / 港股 / 美股）功能实现，把其**港股、美股能力**原样复刻到本仓库，作为多市场扩展。**A 股（`cn`）路径、返回、存储目录名、行为一律不变**；新增能力全部以 `market` 参数（默认 `cn`）隔离，缓存按市场分离。
+
+| 能力 | 实现 | 关键接口 / 存储 |
+| :--- | :--- | :--- |
+| ① 全局市场切换 | `frontend/src/lib/market.tsx`（MarketProvider/useMarket/marketLabel）+ `lib/storage.ts`（`global-market` kv）+ `Layout.tsx` 顶部切换 chip + `MarketNotSupported.tsx` | 切换后各市场页面走对应市场数据/缓存 |
+| ② 市场注册表 | `backend/app/markets.py`：`MarketMeta` / `ALL_MARKETS=[cn,hk,us]`；`market_of`、`normalize_symbol`、`get_market`、`exchanges_for`、`is_trading_now`、`has_limit`、`market_limit_pct`（委托 `app.price_limits`，港美股返回 None）、`stamp_tax_for`、`lot_size_for` | 港美股 `has_limit=False`；印花税 hk 双边 0.001/us 0 |
+| ③ 港美股数据同步 | `POST /api/pipeline/run-market?market=hk|us` → `daily_pipeline.run_market_sync`；标的走 `get_instruments_market` 维表；日K 前复权（`adjust="forward"`，港美股无独立除权因子表）；enriched 由既有 `run_pipeline` merge-upsert 只重算该市场标的 | `instruments_index_{hk,us}/instruments.parquet`；`kline_daily` / `kline_daily_enriched`（本地按现状共享目录，见下） |
+| ④ 港美股指数 | `backend/app/services/index_sync_market.py` + `api/indices_market.py`（router `/api/indices/market`，`market` Query 默认 `hk`）：港股 HSI/恒生科技/恒生国企/红筹/创业板 GEM/恒生综合；美股标普500/纳斯达克/道琼斯/纳斯达克100/VIX；腾讯多级兜底（day/newfqkline/qt 快照）+ 东财重试 | `kline_index_daily_{hk,us}`、`instruments_index_{hk,us}` |
+| ⑤ 强度梯队 | `api/screener/limit-ladder?market=hk|us`：20 日动量档位（≥3%/8%/15%/25%）、新高/动量/放量、60 日新高/新低、板块过滤（港美股板块缺失时降级为无板块过滤） | 替代连板梯队，market 参数透传 |
+| ⑥ 市场环境 Regime | `api/regime/*` 支持 `market`，动量子维度替代投机，数据 `data/regime_{hk,us}` | market 参数透传 |
+| ⑦ 看板总览 | 看板总览支持 `market` 参数 | 按市场路由总览数据/缓存 |
+| ⑧ 港美股 AI 复盘 | 专用 system prompt（禁用涨停/连板）、NDJSON 流式、按市场隔离 + `GET /api/market-recap/market-data` 数据版复盘 | 市场隔离数据 |
+| ⑨ 港美股选股门控 | 涨停类策略（`signal_limit_up`/`signal_broken_limit_up` 等）在 hk/us 自动过滤并提示；仅在明确 market 时才影响策略运行 | `api/strategy.py` run/run-all 门控；涨停类策略标记（tags 含涨停/连板） |
+| ⑩ 回测市场印花税 | `backtest/engine.py`（MatcherConfig.market、`_stamp_tax_pct`）、`backtest/factor.py`（FactorConfig.market、`_round_trip_cost`）：显式 market 时用 `markets.stamp_tax_for` 覆盖策略自定义值（hk 双边 0.001、us 0）；market=None 时 A 股单边口径不变 | 矩阵缓存 `.backtest_matrix_cache_{market}` |
+| ⑪ 个股关键价位 / market 路由 | 个股关键价位支持 market 路由 | 按市场路由 enriched 目录 |
+
+#### 本地存储口径适配（现状适配，非照搬参考目录结构）
+
+- 本地 A 股只有单一 `kline_daily` / `kline_daily_enriched`（共用 `stock` 池），**无港美股独立目录**。为保持最小改动、不破坏共享 enriched 路径，港美股日K/enriched 写入同一目录，由既有 `run_pipeline` merge-upsert 只对指定市场标的重算。
+- 港美股个股维表单独存 `instruments_index_{hk,us}/instruments.parquet`，避免污染 A 股共用 `instruments` 池；`repository.get_instruments_market` 默认 `cn`，A 股行为不变。
+- 港美股无成交额、无概念/行业、无分时（`/minute` 恒空）；美股指数历史仅快照标记 `snapshot:true`；涨停/连板策略在港美股不可用（已门控）。
+
+#### 尚未完成的集成（诚实声明）
+
+- 策略跑的页面层 market 接入（各页面读取 `useMarket` 并路由到对应市场数据）；
+- regime/overview/dashboard/screener/recap/analysis 的 `market` 参数在数据侧完整透传（部分接口已透传，页面层待接入）；
+- DuckDB 视图增量注册（港美股 parquet 写入后视图刷新由 `repository.store._register_views()` 触发）。
+
+> 本章节由多市场扩展复刻工作沉淀，随后续集成推进更新。
+
 ### 关键机制
 
 | 机制                 | 说明                                                                                                                                                                                                                     |

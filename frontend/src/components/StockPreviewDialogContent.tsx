@@ -20,6 +20,7 @@ import { usePreferences } from '@/lib/useSharedQueries'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
 import { navItemKey, type NavItem } from '@/lib/listNav'
+import { marketOfSymbol } from '@/lib/market'
 import { useListNav } from '@/lib/useListNav'
 import { DEFAULT_INTRADAY_DAYS, cnToday, klineDateRange } from '@/lib/kline'
 import { useQuoteClock } from '@/lib/useQuoteClock'
@@ -137,11 +138,12 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
     enabled: !!symbol,
   })
   // 异动边缘: 与异动页同 queryKey 共享缓存; 该股处于观察/边缘/触发状态时在图表上方显示信息条。
-  // 尊重异动页「主开关默认关闭, 关闭时零计算」的设计 — 开关关闭时弹窗不触发全市场计算
+  // 尊重异动页「主开关默认关闭, 关闭时零计算」的设计 — 开关关闭时弹窗不触发全市场计算。
+  // 港股/美股不请求: 异动口径是 A 股专属, 后端对非 cn 直接 409。
   const abnormal = useQuery({
     queryKey: QK.abnormalOverview(0.5, 300),
     queryFn: () => api.abnormalOverview(0.5, 300),
-    enabled: !!symbol && storage.abnormalEnabled.get(false),
+    enabled: !!symbol && storage.abnormalEnabled.get(false) && marketOfSymbol(symbol) === 'cn',
   })
   const abRow = symbol
     ? abnormal.data?.rows.find(r => r.symbol === symbol)

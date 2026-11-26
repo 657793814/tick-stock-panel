@@ -131,9 +131,9 @@ def test_email_sends_with_saved_smtp_config(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_email_smtp_config", lambda: config)
     monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "password")
     monkeypatch.setattr(
-        "app.services.email_adapter.send_email",
+        "app.services.email_adapter.send_email_diagnose",
         lambda cfg, password, subject, body, max_attempts=2:
-            calls.update(config=cfg, password=password, subject=subject, max_attempts=max_attempts) or True,
+            calls.update(config=cfg, password=password, subject=subject) or (True, ""),
     )
 
     result = run_webhook_test(WebhookTestIn(channel="email"))
@@ -141,7 +141,30 @@ def test_email_sends_with_saved_smtp_config(monkeypatch):
     assert result["ok"] is True
     assert calls["config"] == config
     assert calls["password"] == "password"
-    assert calls["max_attempts"] == 1
+
+
+def test_email_failure_detail_carries_actionable_reason(monkeypatch):
+    """邮件失败要把可操作原因带回前端(主机写错/授权码错), 不能只给「详情见日志」。"""
+    config = {
+        "host": "mail.qq.com",
+        "port": 465,
+        "security": "ssl",
+        "username": "bot@qq.com",
+        "from_address": "bot@qq.com",
+        "to_addresses": ["alerts@qq.com"],
+    }
+    monkeypatch.setattr("app.services.preferences.get_email_smtp_config", lambda: config)
+    monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "password")
+    monkeypatch.setattr(
+        "app.services.email_adapter.send_email_diagnose",
+        lambda *a, **k: (False, "OSError: [Errno 101] Network is unreachable"),
+    )
+
+    result = run_webhook_test(WebhookTestIn(channel="email"))
+
+    assert result["ok"] is False
+    assert "smtp.qq.com" in result["detail"]
+    assert "Network is unreachable" in result["detail"]
 
 
 def test_unknown_channel_rejected_by_pydantic():

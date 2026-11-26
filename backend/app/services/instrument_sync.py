@@ -113,6 +113,42 @@ def sync_instruments(data_dir: Path) -> int:
 # 这些字段缺失会让 enriched 的 turnover_rate / 市值为空, 进而使
 # 依赖换手率与流通市值的策略筛不出任何标的 —— 因此绝不能用 null 覆盖已有值。
 # 涨跌停价随交易日变化，不从历史维表继承。
+
+
+def sync_market_instruments(data_dir: Path, market: str) -> int:
+    """同步港美股个股维表 → data/instruments_index_{market}/instruments.parquet。
+
+    港美股单独存放（与 A 股 stock 维表同构），避免污染 A 股 stock 池与共用维表。
+    返回写入的行数。
+    """
+    from app.markets import get_market
+
+    # 客户端必须在本地取: 本函数此前漏了这行, 只有异常分支能跑, 一旦真正调用
+    # 就 NameError('tf') 并被自身 try/except 吞成“0 只标的”。
+    tf = get_client()
+    exchanges = get_market(market).exchanges
+    rows: list[dict] = []
+    for ex in exchanges:
+        try:
+            items = tf.exchanges.get_instruments(ex, instrument_type="stock")
+            if items:
+                rows.extend(_flatten_instruments(items, current_limits=True))
+                logger.info("instruments %s (%s): %d stocks", ex, market, len(items))
+        except Exception as e:
+            logger.warning("get_instruments(%s/%s) failed: %s", ex, market, e)
+    if not rows:
+        return 0
+
+    df = pl.DataFrame(rows)
+    df = _preserve_instrument_fields(df, data_dir)
+    df = df.with_columns(pl.lit(cn_today()).alias("as_of"))
+
+    out = data_dir / f"instruments_index_{market}" / "instruments.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_parquet(df, out)
+
+    logger.info("instruments %s synced: %d rows → %s", market, df.height, out)
+    return df.height
 _SHARE_FIELDS = (
     "listing_date", "total_shares", "float_shares", "tick_size",
 )

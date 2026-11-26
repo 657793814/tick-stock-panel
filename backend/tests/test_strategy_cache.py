@@ -13,6 +13,24 @@ def _result(*symbols: str) -> dict:
     }
 
 
+def test_cache_files_are_isolated_by_market_and_clear_all(tmp_path):
+    """A 股沿用旧文件名；港美股独立文件；全量清缓存覆盖所有市场。"""
+    strategy_cache.write_cache(tmp_path, "2026-07-20", {"s": _result("000001.SZ")}, market="cn")
+    strategy_cache.write_cache(tmp_path, "2026-07-20", {"s": _result("00700.HK")}, market="hk")
+    strategy_cache.write_cache(tmp_path, "2026-07-20", {"s": _result("AAPL.US")}, market="us")
+
+    assert (tmp_path / "user_data" / "strategy_cache.json").exists()
+    assert (tmp_path / "user_data" / "strategy_cache_hk.json").exists()
+    assert (tmp_path / "user_data" / "strategy_cache_us.json").exists()
+    assert strategy_cache.read_cache(tmp_path)["results"]["s"]["rows"][0]["symbol"] == "000001.SZ"
+    assert strategy_cache.read_cache(tmp_path, "hk")["results"]["s"]["rows"][0]["symbol"] == "00700.HK"
+    assert strategy_cache.read_cache(tmp_path, "us")["results"]["s"]["rows"][0]["symbol"] == "AAPL.US"
+
+    strategy_cache.clear_cache(tmp_path)
+    for m in ("cn", "hk", "us"):
+        assert strategy_cache.read_cache(tmp_path, m) is None
+
+
 def test_strict_publication_reports_write_failure_and_preserves_old_snapshot(tmp_path, monkeypatch):
     strategy_cache.write_cache(tmp_path, "2026-07-20", {"strategy_a": _result("000001.SZ")})
 

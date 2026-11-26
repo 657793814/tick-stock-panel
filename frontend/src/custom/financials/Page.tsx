@@ -11,6 +11,7 @@ import { StockFinancialDetail } from '@/components/financials/StockFinancialDeta
 import { ReportHistoryPanel } from '@/components/financials/ReportHistoryPanel'
 import { LastStockChip } from '@/components/LastStockChip'
 import { useLastStock } from '@/lib/useLastStock'
+import { useMarket, marketLabel } from '@/lib/market'
 import { fmtBigNum } from '@/lib/format'
 import { toast } from '@/components/Toast'
 
@@ -31,6 +32,7 @@ const TABLE_ICON: Record<string, typeof FileText> = {
 }
 
 export function Financials() {
+  const { market } = useMarket()
   const { data: caps } = useCapabilities()
   const { data: matrix } = useCapabilityMatrix()
   const { data: status, isLoading } = useFinancialStatus()
@@ -63,6 +65,40 @@ export function Financials() {
   const pick = (symbol: string, name: string) => {
     setSelected({ symbol, name })
     rememberStock(symbol, name)
+  }
+
+  // 港美股: 财务数据源(当前 TickFlow)只覆盖 A 股, 这里显式说明而不是留一个
+  // 搜不到任何结果的空搜索页。
+  if (market !== 'cn') {
+    return (
+      <>
+        <PageHeader title="财务概况" subtitle="利润表 / 资负表 / 现金流 / 关键指标 / 股本 / AI分析" />
+        <div className="px-8 py-10">
+          <div className="mx-auto max-w-md rounded-card border border-warning/30 bg-warning/[0.04] p-8 text-center">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-warning/10">
+              <Lock className="h-6 w-6 text-warning" />
+            </div>
+            <h3 className="mt-4 text-[16px] leading-6 font-semibold text-foreground">
+              {marketLabel(market)}财务数据暂不支持
+            </h3>
+            <p className="mt-2 text-xs leading-relaxed text-secondary">
+              当前财务数据源仅提供 A 股财务报表（利润表/资负表/现金流/关键指标）。
+              切换到 A 股市场即可查看完整财务数据；港美股暂由行情与估值数据覆盖。
+            </p>
+            <div className="mt-5 rounded-btn border border-accent/25 bg-accent/[0.05] px-3.5 py-3 text-left">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-accent">
+                <Lightbulb className="h-3.5 w-3.5 shrink-0" />
+                说明
+              </div>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-secondary">
+                看板、连板/强度梯队、行情与筛选均已支持港美股；财务概况受上游数据源限制，
+                接入覆盖港美股的财务源后会自动开放。
+              </p>
+            </div>
+          </div>
+        </div>
+      </>
+    )
   }
 
   if (!hasFinancial) {

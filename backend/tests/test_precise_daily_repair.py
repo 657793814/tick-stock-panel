@@ -600,3 +600,73 @@ def test_realtime_matrix_rebuilds_history_after_daily_repair_revision(monkeypatc
     ), ["test"])
     np.testing.assert_allclose(first.close[:, 0], [10.0, 20.0, 30.0])
     np.testing.assert_allclose(second.close[:, 0], [5.0, 7.0, 30.0])
+
+
+def test_us_issue_does_not_block_a_share_paths(tmp_path):
+    """单条美股未决记录不得阻断 A 股 enriched/选股/回测 (条目按市场隔离)。"""
+    from app.services import daily_health
+    from app.services.data_integrity import IntegrityIssue
+
+    day = date(2026, 11, 25)
+    issue = IntegrityIssue(day, "kline_daily", "invalid", symbols=("AVAL.US",),
+                           reason="最低价大于开盘价、收盘价或最高价")
+    daily_health.record_scan(tmp_path, [issue], assets=["stock"], start=day, end=day)
+    assert daily_health.snapshot(tmp_path)["entries"][0]["market"] == "us"
+
+    daily_health.assert_usable(tmp_path)  # A 股默认路径
+    daily_health.assert_usable(tmp_path, "stock", enriched_only=True)
+    with pytest.raises(daily_health.DailyIntegrityError):
+        daily_health.assert_usable(tmp_path, "stock", market="us")
+    with pytest.raises(daily_health.DailyIntegrityError):
+        daily_health.assert_usable(tmp_path, "stock", market=None)
+
+
+def test_a_share_issue_still_blocks_default_path(tmp_path):
+    from app.services import daily_health
+    from app.services.data_integrity import IntegrityIssue
+
+    day = date(2026, 11, 25)
+    issue = IntegrityIssue(day, "kline_daily", "invalid", symbols=("600000.SH",), reason="日K数值异常")
+    daily_health.record_scan(tmp_path, [issue], assets=["stock"], start=day, end=day)
+
+    with pytest.raises(daily_health.DailyIntegrityError):
+        daily_health.assert_usable(tmp_path)
+    daily_health.assert_usable(tmp_path, "stock", market="us")
+
+
+def test_unknown_symbol_issue_blocks_every_market(tmp_path):
+    """无法定位 symbol 的整日异常没有市场归属, 所有市场都要等它修补完成。"""
+    from app.services import daily_health
+    from app.services.data_integrity import IntegrityIssue
+
+    day = date(2026, 11, 25)
+    issue = IntegrityIssue(day, "kline_daily", "missing", reason="日期缺失")
+    daily_health.record_scan(tmp_path, [issue], assets=[], start=day, end=day)
+
+    with pytest.raises(daily_health.DailyIntegrityError):
+        daily_health.assert_usable(tmp_path)
+    with pytest.raises(daily_health.DailyIntegrityError):
+        daily_health.assert_usable(tmp_path, "stock", market="us")
+
+
+def test_legacy_state_without_market_is_derived_from_symbol(tmp_path):
+    """旧状态文件没有 market 字段时按 symbol 推导, 不虚构也不误阻断。"""
+    import json
+
+    from app.services import daily_health
+
+    path = tmp_path / "user_data" / "daily_integrity_state.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "version": 1,
+        "entries": [{
+            "asset_type": "stock", "day": "2026-11-25", "symbol": "AVAL.US",
+            "needs_raw": True, "needs_enriched": True,
+            "kind": "invalid", "reason": "最低价大于开盘价",
+        }],
+        "revisions": {},
+    }), encoding="utf-8")
+
+    daily_health.assert_usable(tmp_path)
+    with pytest.raises(daily_health.DailyIntegrityError):
+        daily_health.assert_usable(tmp_path, "stock", market="us")

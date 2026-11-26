@@ -1,0 +1,20 @@
+# 东方财富 — 公开行情接口插件 (push2his.eastmoney.com, 免 token)
+# 纯 HTTP REST 源, 无额外依赖 (runtime: none), 启动自检不做网络请求。
+#
+# 数据集声明约定(对齐 fuyao.dragon_tiger 的项目惯例): moneyflow 属非路由数据集
+# (能力路由 CAPABILITY_REGISTRY 无对应槽位), 不写入本清单 datasets —— 清单只列
+# 可路由的标准能力数据集。消费方经 custom.loader.get_provider("eastmoney")
+# 直取 provider.get_moneyflow(); 落因子由 scripts/ingest_moneyflow_factors.py 负责。
+
+name: eastmoney
+display_name: "eastmoney"
+runtime: none
+entry: app.plugins.eastmoney.provider:EastmoneyProvider
+check: app.plugins.eastmoney.provider:availability
+datasets: []
+description: "东方财富公开接口(免token)。非路由数据集 moneyflow: 个股资金流日线(主力/超大单/大单/小单净额与占比, 约120个交易日历史), 经 provider.get_moneyflow 由 ext_data 因子通道消费, 不参与能力路由。高频请求会触发东财 IP 风控, provider 已内置逐股节流。"
+usage_notes:
+  - "moneyflow 非标准行情数据集: 不出现在能力路由, 由 scripts/ingest_moneyflow_factors.py 消费落 ext_data 因子列(与 fuyao.dragon_tiger 同一约定)。"
+  - "历史深度约 120 个交易日; 净额单位元(正=净流入), 占比为百分数数值。"
+  - "落因子前由脚本统一做 T-1 滞后(当日盘后资金流 → 次交易日生效), 防前视。"
+homepage: "https://quote.eastmoney.com/"

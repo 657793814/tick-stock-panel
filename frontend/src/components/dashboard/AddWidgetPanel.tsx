@@ -11,15 +11,18 @@ import { createPortal } from 'react-dom'
 import { Plus } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { sanitizeExtUrl, type WidgetType } from './layout'
-import { WIDGET_DEFS } from './registry'
+import { widgetsForMarket } from './registry'
+import type { Market } from '@/lib/market'
 
 const PANEL_W = 288 // w-72
 
 export function AddWidgetPanel({
   placedTypes,
+  market,
   onAdd,
 }: {
   placedTypes: Set<WidgetType>
+  market: Market
   onAdd: (t: WidgetType, props?: Record<string, string>) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -106,7 +109,7 @@ export function AddWidgetPanel({
         >
           <div className="mb-1.5 px-0.5 text-[10px] font-medium text-muted">内置组件</div>
           <div className="max-h-56 space-y-0.5 overflow-y-auto">
-            {WIDGET_DEFS.filter(d => d.id !== 'ext-link').map(d => {
+            {widgetsForMarket(market).filter(d => d.id !== 'ext-link').map(d => {
               const placed = placedTypes.has(d.id)
               return (
                 <button

@@ -1,0 +1,1 @@
+{"id": "ma_dead_5_10", "name": "5日线下穿10日线", "kind": "exit", "conditions": [{"left": "ma5", "op": "<=", "right": "field:ma10"}]}

@@ -227,34 +227,59 @@ def search_instruments(
     q: str = Query("", min_length=0, max_length=50, description="搜索关键词"),
     limit: int = Query(20, ge=1, le=50),
     asset_types: str = Query("stock", description="逗号分隔的资产类型: stock,etf"),
+    market: str = Query("cn", description="逻辑市场: cn/hk/us"),
 ):
-    """模糊搜索标的 (代码 / 名称)。从内存 instruments 缓存中查。
+    """模糊搜索标的 (代码 / 名称)。
 
     默认只搜股票, 保持既有调用方行为不变; 自选等场景传 asset_types=stock,etf
     可一并搜出 ETF, 结果附带 asset_type 字段供前端区分。
+
+    market 非 cn 时改搜 instruments_index_{market}（港美股个股维表），并忽略
+    asset_types —— 港美股只有个股，没有独立的 ETF/指数维表。结果附带 market
+    字段, 前端据此决定「加入自选」后落在哪个市场。
     """
+    from app.markets import ALL_MARKETS
+
+    if market not in ALL_MARKETS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"非法市场 '{market}', 支持: {', '.join(ALL_MARKETS)}",
+        )
     if not q.strip():
         return {"results": []}
 
     repo = request.app.state.repo
     import polars as pl
 
-    types = [t.strip() for t in asset_types.split(",") if t.strip()]
-    parts: list[pl.DataFrame] = []
-    for t in types:
-        df_t = repo.get_instruments_asset(t)
-        if df_t.is_empty() or "symbol" not in df_t.columns:
-            continue
-        # dtype 全部归一到 Utf8: 股票/ETF 两份缓存来源不同 (ETF 含 legacy 合并), 防 concat SchemaError
-        parts.append(df_t.with_columns([
+    if market == "cn":
+        types = [t.strip() for t in asset_types.split(",") if t.strip()]
+        parts: list[pl.DataFrame] = []
+        for t in types:
+            df_t = repo.get_instruments_asset(t)
+            if df_t.is_empty() or "symbol" not in df_t.columns:
+                continue
+            # dtype 全部归一到 Utf8: 股票/ETF 两份缓存来源不同 (ETF 含 legacy 合并), 防 concat SchemaError
+            parts.append(df_t.with_columns([
+                pl.col("symbol").cast(pl.Utf8).alias("symbol"),
+                (pl.col("name").cast(pl.Utf8) if "name" in df_t.columns else pl.lit("")).alias("name"),
+                (pl.col("code").cast(pl.Utf8) if "code" in df_t.columns else pl.lit("")).alias("code"),
+                pl.lit(t).alias("asset_type"),
+            ]).select(["symbol", "name", "code", "asset_type"]))
+        if not parts:
+            return {"results": []}
+        df = pl.concat(parts, how="vertical").with_columns(pl.lit(market).alias("market"))
+    else:
+        df_m = repo.get_instruments_market(market)
+        if df_m.is_empty() or "symbol" not in df_m.columns:
+            # 该市场维表还没同步: 明确空结果, 不降级去搜 A 股 (会把茅台当成港股结果)
+            return {"results": [], "market": market}
+        df = df_m.with_columns([
             pl.col("symbol").cast(pl.Utf8).alias("symbol"),
-            (pl.col("name").cast(pl.Utf8) if "name" in df_t.columns else pl.lit("")).alias("name"),
-            (pl.col("code").cast(pl.Utf8) if "code" in df_t.columns else pl.lit("")).alias("code"),
-            pl.lit(t).alias("asset_type"),
-        ]).select(["symbol", "name", "code", "asset_type"]))
-    if not parts:
-        return {"results": []}
-    df = pl.concat(parts, how="vertical")
+            (pl.col("name").cast(pl.Utf8) if "name" in df_m.columns else pl.lit("")).alias("name"),
+            (pl.col("code").cast(pl.Utf8) if "code" in df_m.columns else pl.lit("")).alias("code"),
+            pl.lit("stock").alias("asset_type"),
+            pl.lit(market).alias("market"),
+        ]).select(["symbol", "name", "code", "asset_type", "market"])
 
     keyword = q.strip().upper()
     is_pinyin_query = keyword.isalpha() and keyword.isascii()
@@ -288,7 +313,7 @@ def search_instruments(
                     if len(pinyin_rows) >= remaining:
                         break
             if pinyin_rows:
-                collected.append(pl.DataFrame(pinyin_rows))
+                collected.append(pl.DataFrame(pinyin_rows).select(df.columns))
                 seen.update(r["symbol"] for r in pinyin_rows)
                 remaining -= len(pinyin_rows)
 
@@ -302,17 +327,33 @@ def search_instruments(
             pl.concat(collected, how="vertical") if len(collected) > 1
             else (collected[0] if collected else df.head(0))
         )
-    rows = matched.select(["symbol", "name", "code", "asset_type"]).to_dicts()
+    rows = matched.select(["symbol", "name", "code", "asset_type", "market"]).to_dicts()
     return {"results": rows}
 
 
 @router.post("/instruments/names")
 def instruments_names(request: Request, symbols: list[str]):
-    """批量查标的名称 (股票 + ETF + 指数)。传入 symbol 列表, 返回 {symbol: name}。"""
+    """批量查标的名称 (股票 + ETF + 指数 + 港美股个股)。
+
+    按 symbol 后缀分市场解析: A 股走 instruments 池, 港美股查对应的
+    instruments_index_{market}。自选可跨市场, 缺任一市场都会让该行名称变 null。
+    """
     if not symbols:
         return {"names": {}}
+    from app.markets import market_of
+
     repo = request.app.state.repo
-    return {"names": repo.get_name_map(symbols)}
+    names: dict[str, str] = {}
+    by_market: dict[str, list[str]] = {}
+    for s in symbols:
+        by_market.setdefault(market_of(s), []).append(s)
+    for m, syms in by_market.items():
+        try:
+            wanted = set(syms)
+            names.update({k: v for k, v in repo.get_market_name_map(m).items() if k in wanted})
+        except Exception as e:  # noqa: BLE001
+            logger.debug("name resolve failed for market %s: %s", m, e)
+    return {"names": names}
 
 
 def _get_stock_info(repo, symbol: str) -> dict:
@@ -324,7 +365,12 @@ def _get_stock_info(repo, symbol: str) -> dict:
     """
     import polars as pl
     try:
-        df = repo.get_instruments()
+        from app.markets import market_of
+
+        market = market_of(symbol)
+        # 港美股维表单独存放 (instruments_index_{market}); A 股池里没有它们,
+        # 只查 get_instruments() 会让港股详情的名称/股本恒为空。
+        df = repo.get_instruments() if market == "cn" else repo.get_instruments_market(market)
         needed = ("symbol", "name", "total_shares", "float_shares")
         if df.is_empty() or not all(c in df.columns for c in needed):
             return {}
@@ -1876,11 +1922,21 @@ async def repair_daily(request: Request):
 
 
 @router.post("/rebuild_enriched")
-async def rebuild_enriched(request: Request):
+async def rebuild_enriched(request: Request, market: str = "cn"):
     """全量重算 enriched 表 — 不获取任何数据,仅基于已有 kline_daily + adj_factor 重算复权+指标。
 
     返回 job_id,可轮询 /api/pipeline/jobs 查看进度。
+
+    market: 逻辑市场, 默认 cn（与既有调用完全一致）。港美股传 hk/us 时只重算
+    该市场标的的指标（止损于共享存储里混入的 A 股行）, 用于同步后修正指标口径。
     """
+    from app.markets import ALL_MARKETS
+
+    if market not in ALL_MARKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法市场 '{market}', 支持: {', '.join(ALL_MARKETS)}",
+        )
     import asyncio
     try:
         repo = request.app.state.repo
@@ -1919,9 +1975,21 @@ async def rebuild_enriched(request: Request):
                              f"计算指标 批次 {cur}/{tot}",
                              stage_pct=int(100 * cur / tot), skip_log=True)
 
+                symbols: list[str] | None = None
+                if market != "cn":
+                    from app.markets import symbols_of
+
+                    inst = repo.get_instruments_market(market)
+                    if not inst.is_empty() and "symbol" in inst.columns:
+                        symbols = symbols_of(inst, market)
+                    if not symbols:
+                        job_store.fail(job_id, f"{market} 无标的维表，请先同步该市场数据")
+                        return
+
                 written = await loop.run_in_executor(
                     _long_task_executor, run_with_capacity, job_id,
-                    lambda: run_pipeline(on_batch_done=_batch_progress),
+                    lambda: run_pipeline(symbols=symbols, on_batch_done=_batch_progress,
+                                         market=market),
                 )
 
                 enriched_dir = repo.store.data_dir / "kline_daily_enriched"

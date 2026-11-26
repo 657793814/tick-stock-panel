@@ -3,6 +3,9 @@ import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
+import { marketLabel, useMarket } from '@/lib/market'
+import { AmbientFX } from '@/components/motion/AmbientFX'
+import { MarketSwitchFX } from '@/components/motion/MarketSwitchFX'
 import { ToastContainer, toast } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
@@ -18,7 +21,6 @@ import {
   useQuoteStatus,
   useVersion,
 } from '@/lib/useSharedQueries'
-import { useUpdateCheck } from '@/lib/updateCheck'
 import {
   useToggleRealtimeQuotes,
 } from '@/lib/useSharedMutations'
@@ -47,10 +49,10 @@ import {
   PanelLeft,
   PanelLeftClose,
   PanelLeftOpen,
-  Download,
   HardDriveDownload,
 } from 'lucide-react'
 import { Logo } from './Logo'
+import { MarketDataBanner } from './MarketDataBanner'
 import { api, type CapabilityMatrix, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { useIsDesktop } from '@/lib/useMediaQuery'
@@ -348,15 +350,34 @@ function AIConfigBadge({ configured, model }: { configured?: boolean; model?: st
 // 移动端 (<768px) 不参与三态 — aside 以抽屉呈现 (见 Layout 内 drawerOpen)。
 type NavState = 'expanded' | 'rail' | 'hidden'
 
+// 每个市场的主题色（与市场切换胶囊一致）：让整页霓虹随市场换色，
+// 切换时除了过场动画，环境光也一起变，强化「进入另一个市场」的体感。
+const MARKET_TONE: Record<'cn' | 'hk' | 'us', string> = {
+  cn: '217 91% 60%',
+  hk: '190 95% 52%',
+  us: '265 90% 68%',
+}
+
 export function Layout() {
   useStrategyLibrarySync()
+  // 全局市场切换 (多市场扩展): cn=A股 / hk=港股 / us=美股，切换后各市场数据/接口按此路由
+  const { market, setMarket } = useMarket()
+  // 切换过场的播放次数：只在「市场真的变了」时自增，首次进入不放动画。
+  const [switchNonce, setSwitchNonce] = useState(0)
+  const prevMarketRef = useRef(market)
+  useEffect(() => {
+    if (prevMarketRef.current === market) return
+    prevMarketRef.current = market
+    setSwitchNonce(n => n + 1)
+  }, [market])
+  // 市场主题色写到根节点：固定定位的粒子/网格/扫描带也能跟着换色。
+  useEffect(() => {
+    document.documentElement.style.setProperty('--tf-market', MARKET_TONE[market])
+  }, [market])
   // ===== 共享 hooks (替代内联 useQuery) =====
   const { data: settingsState } = useSettings()
   const { data: matrix } = useCapabilityMatrix()
   const { data: versionData } = useVersion()
-  // 更新检查 (单例 store): 启动静默查一次 GitHub Releases, 供左下角版本号徽标
-  const update = useUpdateCheck()
-  const hasUpdate = update.status === 'found'
   const { data: prefs } = usePreferences()
   // 批量端点单请求上限 = 前端分块大小 (与后端校验同源, 见 lib/klineBatchLimits)。
   // 在渲染期写入而非 effect: 分块助手在子组件 queryFn 内调用, 而 queryFn 早于
@@ -480,8 +501,8 @@ export function Layout() {
     staleTime: 60_000,
   })
   const { data: navEnriched } = useQuery({
-    // 无参 → key 归一为 ['watchlist-enriched', ''], 与自选页 (无 ext 列时) 共享缓存,
-    // 消除侧栏与自选页各拉一份整表的双份内存
+    // 无参 → key 归一为 ['watchlist-enriched', '', 'cn'], 与自选页 (A 股 + 无 ext 列)
+    // 共享缓存, 消除侧栏与自选页各拉一份整表的双份内存。港美股自选另有 key。
     queryKey: QK.watchlistEnriched(),
     queryFn: () => api.watchlistEnriched(),
     enabled: navGroupPctVisible,
@@ -869,7 +890,7 @@ export function Layout() {
       <aside
         onMouseLeave={() => { if (overlayPreview) setOverlayPreview(false) }}
         className={cn(
-          'bg-surface flex flex-col min-h-0 overflow-hidden',
+          'relative z-[2] bg-surface flex flex-col min-h-0 overflow-hidden',
           isDesktop
             ? cn('h-full', navState === 'hidden' && !overlayPreview ? 'border-r-0' : 'border-r border-border')
             : cn(
@@ -936,6 +957,40 @@ export function Layout() {
             </div>
           )}
         </div>
+
+        {/* 全局市场切换 (多市场扩展): cn=A股 / hk=港股 / us=美股。
+            滑块用 layoutId 做弹簧位移（MotionKit GlassTabBar 思路），切换同时
+            Layout 的 Outlet 按 market 重挂载，页面数据不会跨市场残留。 */}
+        <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2.5">
+          <span className="shrink-0 text-xs font-medium text-muted">市场</span>
+          <div className="tf-market-switch" role="tablist" aria-label="选择市场">
+            {(['cn', 'hk', 'us'] as const).map(m => (
+              <button
+                key={m}
+                type="button"
+                role="tab"
+                aria-selected={market === m}
+                onClick={() => setMarket(m)}
+                aria-pressed={market === m}
+                className="tf-market-tab"
+              >
+                {market === m && (
+                  <motion.span
+                    layoutId="tf-market-pill"
+                    className={cn('tf-market-pill', `tf-market-pill-${m}`)}
+                    transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                  />
+                )}
+                <span className="relative z-10">{marketLabel(m)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 数据状态条: 三市场统一显示「上次/下次同步」时点;
+            港美股额外显示本地规模/最新日期, 无数据时给同步入口。
+            港美股与 A 股共用日K存储, 从未单独同步时页面只会空白, 需要明确告知原因。 */}
+        <MarketDataBanner />
 
         <nav className="tf-nav-scroll flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
           {visibleLayout.items.map(node => {
@@ -1107,35 +1162,7 @@ export function Layout() {
                   {!railMode && version && (
                     <span className="ml-auto flex items-center gap-1.5 font-mono text-[10px] text-muted/50 select-none shrink-0">
                       {version}
-                      {hasUpdate && update.info && (
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          title={`发现新版本 ${update.info.latest}，点击检查更新`}
-                          onClick={(e) => {
-                            e.preventDefault()
-                            e.stopPropagation()
-                            navigate('/settings?tab=about&autoupdate=1')
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              navigate('/settings?tab=about&autoupdate=1')
-                            }
-                          }}
-                          className="inline-flex cursor-pointer text-amber-400 transition-transform hover:scale-110 animate-breath"
-                        >
-                          <Download className="h-3 w-3" />
-                        </span>
-                      )}
                     </span>
-                  )}
-                  {railMode && hasUpdate && (
-                    <span
-                      className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_6px_rgba(59,130,246,0.8)]"
-                      title="发现新版本"
-                    />
                   )}
                 </>
               )}
@@ -1144,11 +1171,18 @@ export function Layout() {
         </div>
       </aside>
 
+      {/* 环境特效层：极光光斑 / 粒子场随鼠标牵引 / 扫描网格 / 市场切换过场。
+          全部 pointer-events:none，主内容 z-[1] 抬到其上，侧栏 z-[2] 不受影响。 */}
+      <div className="tf-aurora" aria-hidden><i /><i /><i /></div>
+      <AmbientFX market={market} />
+      <div className="tf-grid-veil" aria-hidden />
+      <MarketSwitchFX market={market} nonce={switchNonce} />
+
       <motion.main
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-        className="h-full overflow-auto scrollbar-gutter-stable"
+        className="tf-neon-main relative z-[1] h-full overflow-auto scrollbar-gutter-stable"
       >
         {streamStatus === 'reconnecting' && (
           <div
@@ -1161,16 +1195,28 @@ export function Layout() {
           </div>
         )}
         <DailyDataHealthNotice />
-        <Suspense
-          fallback={
-            <div className="flex items-center justify-center py-24">
-              <Loader2 className="h-5 w-5 animate-spin text-muted" />
-            </div>
-          }
+        {/* 市场切换 = 页面立即重挂载：旧市场 DOM 直接移除，新市场带模糊淡入，
+            不做 exit 等待，杜绝旧数据在新市场页面停留；路由跳转不换 key。 */}
+        <motion.div
+          key={market}
+          className="h-full"
+          initial={{ opacity: 0, y: 10, filter: 'blur(5px)' }}
+          animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+          transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
         >
-          <Outlet />
-        </Suspense>
+          <Suspense
+            fallback={
+              <div className="flex items-center justify-center py-24">
+                <Loader2 className="h-5 w-5 animate-spin text-muted" />
+              </div>
+            }
+          >
+            <Outlet />
+          </Suspense>
+        </motion.div>
       </motion.main>
+      {/* 全屏扫描带：盖在内容之上（pointer-events:none），周期性自上而下扫过 */}
+      <div className="tf-scanbar" aria-hidden />
       <ToastContainer />
       <AlertToastContainer />
       <AiAnalysisHost />

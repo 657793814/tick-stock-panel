@@ -1,0 +1,14 @@
+{
+  "webhook_default_channels": [
+    "custom",
+    "email"
+  ],
+  "webhook_enabled_channels": [
+    "custom",
+    "email"
+  ],
+  "review_push_channels": [
+    "email",
+    "wecom"
+  ]
+}

@@ -9,16 +9,24 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import date
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app import cache_store
+from app.market_time import cn_today, in_continuous_session
+from app.markets import ALL_MARKETS, normalize_symbol
 from app.strategy import paper
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
+
+# B008: FastAPI 参数默认值需要 Query(...) 调用, 提为模块级单例复用。
+_REPLAY_START = Query(None, description="成交日期起 (含)")
+_REPLAY_END = Query(None, description="成交日期止 (含)")
 
 
 def _data_dir(request: Request) -> Path:
@@ -36,8 +44,9 @@ class AccountModel(BaseModel):
     initial_cash: float
     account_id: str = paper.DEFAULT_ACCOUNT_ID
     name: str | None = None
+    market: str = "cn"
     commission_pct: float = paper.DEFAULT_COMMISSION_PCT
-    stamp_tax_pct: float = paper.DEFAULT_STAMP_TAX_PCT
+    stamp_tax_pct: float | None = None  # 缺省按市场给默认（cn 沿用历史 0.001）
     slippage_bps: float = paper.DEFAULT_SLIPPAGE_BPS
     queue_limit_orders: bool = False
 
@@ -90,6 +99,20 @@ def _last_close(data_dir: Path, symbol: str, asset_type: str) -> float | None:
     return float(df["close"][0])
 
 
+def _name_map(request: Request, symbols: list[str]) -> dict[str, str]:
+    """批量名称解析 (软失败: 维表不可用时回放仍可展示代码)。"""
+    if not symbols:
+        return {}
+    repo = getattr(request.app.state, "repo", None)
+    if repo is None or not hasattr(repo, "get_name_map"):
+        return {}
+    try:
+        return repo.get_name_map(symbols)
+    except Exception as e:  # noqa: BLE001 — 名称是展示增强, 不阻断回放
+        logger.warning("paper replay name lookup failed: %s", e)
+        return {}
+
+
 @router.get("/accounts")
 def list_accounts(request: Request):
     """账户列表 (带最新净值摘要, 供前端切换器)。"""
@@ -104,12 +127,15 @@ def get_account(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
 
 @router.post("/account")
 def create_account(request: Request, body: AccountModel):
+    if body.market not in ALL_MARKETS:
+        raise HTTPException(status_code=400, detail=f"非法市场: {body.market}(可选 {ALL_MARKETS})")
     try:
         acc = paper.create_account(
             _data_dir(request),
             body.initial_cash,
             account_id=_acc(request, body.account_id),
             name=body.name,
+            market=body.market,
             commission_pct=body.commission_pct,
             stamp_tax_pct=body.stamp_tax_pct,
             slippage_bps=body.slippage_bps,
@@ -179,6 +205,7 @@ def create_order(request: Request, body: OrderModel, account: str = Query(paper.
     )
     if err:
         raise HTTPException(status_code=400, detail=err)
+    cache_store.invalidate_namespace("paper-live-feed")
     return {"order": order}
 
 
@@ -191,11 +218,112 @@ def list_orders(request: Request, status: str | None = None, account: str = Quer
     return {"orders": orders}
 
 
+@router.get("/live-feed")
+def live_feed(request: Request, limit: int = Query(40, ge=1, le=120)):
+    """跨账户最近撮合流水 (只读), 供模拟盘资金全景。
+
+    每个账户只读最近 8 个订单文件 (按 mtime); 结果按盘中 3s / 休市 30s
+    共享缓存。额外附带标的名称与最新价/涨跌幅 (行情不可用时为空),
+    让左栏「股票代号 → 名称 → 现价 → 涨跌幅」一次拿全。
+    """
+    key = str(limit)
+    cached = cache_store.get_json("paper-live-feed", key)
+    if cached is not None:
+        return cached
+    data_dir = _data_dir(request)
+    items: list[dict] = []
+    # 全量口径统计: 委托流水/活跃账户必须反映全部订单, 而不是 items 里那截
+    # "最近流水" (每账户只读 8 单 + limit 截断, 数字会偏小且随轮询波动)。
+    total_orders = total_buys = total_sells = 0
+    active_accs: set[str] = set()
+    for aid in paper.list_account_ids(data_dir):
+        acc = paper.get_account(data_dir, aid) or {}
+        name = str(acc.get("name") or aid)
+        for o in paper.load_orders(data_dir, aid):
+            total_orders += 1
+            active_accs.add(aid)
+            if o.get("side") == "buy":
+                total_buys += 1
+            elif o.get("side") == "sell":
+                total_sells += 1
+        for o in paper.recent_orders(data_dir, aid, limit=8):
+            items.append({
+                "id": o.get("id"),
+                "account": aid,
+                "name": name,
+                "symbol": o.get("symbol"),
+                "side": o.get("side"),
+                "qty": o.get("qty"),
+                "status": o.get("status"),
+                "order_type": o.get("order_type"),
+                "fill_price": o.get("fill_price"),
+                "created_at": o.get("created_at"),
+                "filled_at": o.get("filled_at"),
+            })
+    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    items = items[:limit]
+
+    # 标的名称 + 最新快照 (行情自检未完成/实时关闭时保持 None, 前端退回到成交价)
+    symbols = sorted({str(it["symbol"]) for it in items if it.get("symbol")})
+    names = _name_map(request, symbols)
+    quote_map: dict[str, dict] = {}
+    qs = getattr(request.app.state, "quote_service", None)
+    if qs is not None and symbols:
+        try:
+            import polars as pl
+            qdf = qs.get_quotes_compat()
+            if not qdf.is_empty():
+                cols = [c for c in ("symbol", "close", "change_pct") if c in qdf.columns]
+                for row in qdf.filter(pl.col("symbol").is_in(symbols)).select(cols).to_dicts():
+                    quote_map[str(row["symbol"])] = row
+        except Exception as e:  # noqa: BLE001 — 行情是展示增强
+            logger.debug("paper live-feed quotes unavailable: %s", e)
+    # 实时快照缺失 (行情自检未完成等) 时退到日线: 最新收盘 + 对前一日涨跌幅。
+    # 宁可显示「最近收盘」也不显示空值; 结果按标的集合缓存, 避免每次扫描 parquet。
+    missing = [s for s in symbols if not (quote_map.get(s) or {}).get("close")]
+    if missing:
+        cache_key = ",".join(missing)
+        cached_q = cache_store.get_json("paper-live-daily-quotes", cache_key)
+        if cached_q is None:
+            by_type: dict[str, list[str]] = {}
+            for s in missing:
+                by_type.setdefault(_resolve_asset_type(request, s), []).append(s)
+            cached_q = paper.latest_closes(data_dir, by_type)
+            cache_store.set_json("paper-live-daily-quotes", cache_key, cached_q, ttl=60)
+        for s, row in (cached_q or {}).items():
+            if s not in quote_map:
+                quote_map[s] = row
+    for it in items:
+        symbol = str(it.get("symbol") or "")
+        q = quote_map.get(symbol) or {}
+        it["symbol_name"] = names.get(symbol) or ""
+        it["last_price"] = q.get("close")
+        it["change_pct"] = q.get("change_pct")
+
+    result = {
+        "items": items,
+        "count": len(items),
+        # 全量口径 (前端统计条用): items 只是最近流水的展示窗口
+        "totals": {
+            "orders": total_orders,
+            "buys": total_buys,
+            "sells": total_sells,
+            "active_accounts": len(active_accs),
+        },
+    }
+    cache_store.set_json(
+        "paper-live-feed", key, result,
+        ttl=3 if in_continuous_session() else 30,
+    )
+    return result
+
+
 @router.delete("/orders/{order_id}")
 def cancel_order(request: Request, order_id: str, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
     order, err = paper.cancel_order(_data_dir(request), order_id, _acc(request, account))
     if err:
         raise HTTPException(status_code=400, detail=err)
+    cache_store.invalidate_namespace("paper-live-feed")
     return {"order": order}
 
 
@@ -204,6 +332,48 @@ def list_trades(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
     fills = paper.load_fills(_data_dir(request), _acc(request, account))
     fills.sort(key=lambda f: f.get("seq", 0), reverse=True)
     return {"fills": fills}
+
+
+@router.get("/replay/symbols")
+def replay_symbols(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+    """账户成交过的标的摘要 (回放标的列表)。"""
+    data_dir = _data_dir(request)
+    acc_id = _acc(request, account)
+    if paper.get_account(data_dir, acc_id) is None:
+        raise HTTPException(status_code=404, detail="账户不存在")
+    symbols = sorted({f["symbol"] for f in paper.load_fills(data_dir, acc_id) if f.get("symbol")})
+    return {"symbols": paper.replay_symbols(data_dir, acc_id, names=_name_map(request, symbols))}
+
+
+@router.get("/replay")
+def replay(
+    request: Request,
+    symbol: str = Query(..., description="标的代码, 支持 600519 / hk00700 / AAPL 等写法"),
+    start: date | None = _REPLAY_START,
+    end: date | None = _REPLAY_END,
+    limit: int = Query(500, ge=1, le=2000, description="最多返回成交笔数"),
+    account: str = Query(paper.DEFAULT_ACCOUNT_ID),
+):
+    """单标的成交回放: 成交明细 + K 线标记 + 区间统计。"""
+    if start and end and start > end:
+        raise HTTPException(status_code=400, detail="start 不能晚于 end")
+    data_dir = _data_dir(request)
+    acc_id = _acc(request, account)
+    if paper.get_account(data_dir, acc_id) is None:
+        raise HTTPException(status_code=404, detail="账户不存在")
+    sym = normalize_symbol(symbol)
+    data = paper.replay(
+        data_dir,
+        sym,
+        acc_id,
+        start=start.isoformat() if start else None,
+        end=end.isoformat() if end else None,
+        limit=limit,
+        names=_name_map(request, [sym]),
+    )
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"该账户无 {sym} 成交")
+    return data
 
 
 @router.get("/positions")
@@ -257,11 +427,23 @@ def compare_accounts(request: Request):
             logger.warning("paper compare 实时快照不可用, 用定版口径: %s", e)
 
     rows = []
-    for acc_id in paper.list_account_ids(data_dir):
+    account_ids = paper.list_account_ids(data_dir)
+    # 定版口径: 多账户一次性取价, 避免逐账户扫盘 (账户多时对比接口会拖到几十秒)
+    mark_day = paper.latest_data_day(data_dir)
+    shared_prices = None
+    if live_snapshot is None:
+        shared_prices = paper.prices_for_accounts(data_dir, account_ids, mark_day)
+    for acc_id in account_ids:
         acc = paper.get_account(data_dir, acc_id)
         if acc is None:
             continue
-        ov = paper.overview(data_dir, account_id=acc_id)
+        ov = paper.overview(
+            data_dir,
+            shared_prices,
+            account_id=acc_id,
+            estimating=live_snapshot is not None,
+            price_date=None if live_snapshot is not None else mark_day,
+        )
         if not ov.get("initialized"):
             continue  # 空壳目录 (懒创建) 不进对比
         st = paper.stats(data_dir, acc_id)
@@ -285,6 +467,7 @@ def compare_accounts(request: Request):
             "estimating": live_total is not None,
             "account": acc_id,
             "name": acc.get("name") or acc_id,
+            "market": acc.get("market", "cn"),
             "status": acc.get("status"),
             "initial_cash": initial,
             "fees": {k: acc.get(k) for k in ("commission_pct", "stamp_tax_pct", "slippage_bps")},
@@ -325,6 +508,34 @@ def rebuild(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
     """由成交台账重建物化持仓与现金 (修复兜底)。"""
     positions = paper.rebuild_positions(_data_dir(request), _acc(request, account))
     return {"symbols": len(positions)}
+
+
+@router.post("/settle")
+def settle(
+    request: Request,
+    day: str | None = Query(None, description="结算到该日 (缺省今天), 缺省时会自动补此前漏结算的交易日"),
+    account: str | None = Query(None, description="账户 id; 缺省结算全部账户"),
+):
+    """手动/补结算: 撮合顺延单 → 除权调整 → 定版净值。
+
+    盘后管道只在当天结算一次, 进程停机或管道在日K阶段失败就会漏掉, 顺延单
+    (next_open/close) 便一直挂着「待成交」。此端点按天回放 (幂等, 不会重复成交),
+    用于手动补账; 定时路径已在管道内自动补结算。
+    """
+    data_dir = _data_dir(request)
+    target = day or cn_today().isoformat()
+    try:
+        date.fromisoformat(target)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"日期格式应为 YYYY-MM-DD: {target}") from e
+    acc_ids = [_acc(request, account)] if account else paper.list_account_ids(data_dir)
+    results = [paper.settle_pending_days(data_dir, target, account_id=aid) for aid in acc_ids]
+    return {
+        "day": target,
+        "accounts": results,
+        "filled": sum(r.get("filled", 0) for r in results),
+        "expired": sum(r.get("expired", 0) for r in results),
+    }
 
 
 @router.post("/freeze")
@@ -417,8 +628,9 @@ class ArenaBatchModel(BaseModel):
     initial_cash: float
     sources: list[ArenaSourceModel]
     name_prefix: str = ""                # 账户名前缀 (如 "第一期-", 可空)
+    market: str = "cn"                   # 与市场语义对齐；旧请求默认 A 股
     commission_pct: float = paper.DEFAULT_COMMISSION_PCT
-    stamp_tax_pct: float = paper.DEFAULT_STAMP_TAX_PCT
+    stamp_tax_pct: float | None = None   # 缺省按市场给默认（cn 沿用历史 0.001）
     slippage_bps: float = paper.DEFAULT_SLIPPAGE_BPS
     queue_limit_orders: bool = False
 
@@ -435,8 +647,10 @@ def arena_batch_create(request: Request, body: ArenaBatchModel):
 
     if not body.sources:
         raise HTTPException(status_code=400, detail="至少需要一个来源")
-    if len(body.sources) > 20:
-        raise HTTPException(status_code=400, detail="单次最多创建 20 个对比账户")
+    if len(body.sources) > 60:
+        raise HTTPException(status_code=400, detail="单次最多创建 60 个对比账户")
+    if body.market not in ALL_MARKETS:
+        raise HTTPException(status_code=400, detail=f"非法市场: {body.market}(可选 {ALL_MARKETS})")
 
     data_dir = _data_dir(request)
     try:
@@ -467,6 +681,7 @@ def arena_batch_create(request: Request, body: ArenaBatchModel):
                 data_dir, body.initial_cash,
                 account_id=paper.validate_account_id(account_id),
                 name=acc_name,
+                market=body.market,
                 commission_pct=body.commission_pct,
                 stamp_tax_pct=body.stamp_tax_pct,
                 slippage_bps=body.slippage_bps,

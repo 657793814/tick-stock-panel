@@ -662,6 +662,8 @@ class StrategyBacktestConfig:
     # 市场环境过滤: {"states": ["strong",...], "min_score": 60}。
     # 强制 T-1: regime[T-1] 决定 entry[T](防未来函数)。None=不过滤。
     regime_filter: dict | None = None
+    # 回测市场 (cn|hk|us): 印花税/手数按市场口径, 且标的池已在 API 层按市场过滤。
+    market: str = "cn"
 
     def __post_init__(self) -> None:
         if self.entry_fill is None:
@@ -1632,6 +1634,7 @@ class StrategyBacktestService:
             position_policy_params=position_policy_params,
             minute_fill=config.minute_fill,
             asset_type=config.asset_type,
+            market=config.market,
         )
         t_signal = time.perf_counter()
         selection_stats: dict[str, int | bool]
@@ -2303,6 +2306,7 @@ class StrategyBacktestService:
             # 分钟策略的成交价由 entry_price_override 提供 (触发分钟收盘),
             # 不再叠加日线口径的分钟成交细化。
             minute_fill=False,
+            market=config.market,
         )
 
         t_matrix = time.perf_counter()
@@ -3040,6 +3044,7 @@ class StrategyBacktestService:
             "position_policy": c.position_policy,
             "position_policy_params": c.position_policy_params,
             "asset_type": c.asset_type,
+            "market": c.market,
             "mode": c.mode,
             "holding_days": c.holding_days,
             "minute_fill": c.minute_fill,

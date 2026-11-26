@@ -427,6 +427,14 @@ export interface IndexQuote {
   [key: string]: any
 }
 
+export interface IndexInstrumentMarket {
+  symbol: string
+  name: string
+  asset_type?: string
+  latest?: { date: string; close?: number; change_pct?: number; snapshot?: boolean }
+  [key: string]: any
+}
+
 // ===== Screener =====
 export interface ScreenerStrategy {
   id: string
@@ -435,6 +443,8 @@ export interface ScreenerStrategy {
   source?: string
   /** 支持的周期, 如 ['1d'] / ['1m'] (分钟策略) */
   timeframes?: string[]
+  /** 当前市场是否可用 (港美股对涨停/连板类策略为 false) */
+  market_supported?: boolean
   library?: StrategyLibraryInfo | null
 }
 
@@ -485,6 +495,8 @@ export interface ScreenerRunAllSummary {
   task_id?: string
   /** 已跳过的失效策略 ID (策略池残留, 前端应从池中移除) */
   skipped_unknown?: string[]
+  /** 港美股下被跳过的涨停/连板类策略 (A 股口径, 不参与计算/缓存) */
+  skipped_unsupported?: string[]
 }
 
 export interface ScreenerCachedResult {
@@ -528,6 +540,8 @@ export interface OverviewDimensionRankItem {
 }
 
 export interface OverviewMarket {
+  /** 数据来源市场；旧后端缺字段时按 A 股兼容。 */
+  market?: 'cn' | 'hk' | 'us'
   as_of: string | null
   quote_status: {
     enabled?: boolean
@@ -911,6 +925,8 @@ export interface StrategyDetail {
   tags: string[]
   source: 'custom' | 'ai' | 'composite'
   research_only?: boolean
+  /** 当前市场是否可用；港美股的涨停/连板类策略为 false。 */
+  market_supported?: boolean
   library?: StrategyLibraryInfo | null
   execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite' | 'minute_filter'
   asset_types: string[]
@@ -1215,6 +1231,8 @@ function accUrl(base: string, account?: string): string {
 export interface PaperAccount {
   id: string
   name?: string
+  /** 账户撮合市场；旧账户缺字段时按 A 股兼容。 */
+  market?: 'cn' | 'hk' | 'us'
   initial_cash: number
   cash: number
   commission_pct: number
@@ -1228,6 +1246,7 @@ export interface PaperAccount {
 export interface PaperAccountSummary {
   id: string
   name: string
+  market?: 'cn' | 'hk' | 'us'
   status: 'active' | 'frozen'
   initial_cash?: number
   cash?: number
@@ -1240,6 +1259,8 @@ export interface PaperAccountSummary {
 export interface PaperCompareRow {
   account: string
   name: string
+  /** 账户所属市场 (cn/hk/us, 市场隔离) */
+  market?: 'cn' | 'hk' | 'us'
   status: 'active' | 'frozen'
   initial_cash: number
   fees: { commission_pct: number; stamp_tax_pct: number; slippage_bps: number }
@@ -1318,6 +1339,7 @@ export interface PaperOverview {
   initialized: boolean
   account_id?: string
   account_name?: string
+  market?: 'cn' | 'hk' | 'us'
   status?: 'active' | 'frozen'
   queue_limit_orders?: boolean
   cash?: number
@@ -1326,6 +1348,8 @@ export interface PaperOverview {
   total_pnl?: number
   initial_cash?: number
   estimating?: boolean
+  /** 定版估值所用的行情日（盘中实时估算时为 null） */
+  price_date?: string | null
   holdings?: PaperHolding[]
   fees?: { commission_pct: number; stamp_tax_pct: number; slippage_bps: number }
 }
@@ -1346,6 +1370,36 @@ export interface PaperOrder {
   fill_price?: number | null
   fees?: number | null
   reason?: string | null
+}
+
+/** 跨账户实时撮合流水条目 (只读聚合, 供模拟盘 LIVE 行情带)。 */
+export interface PaperLiveItem {
+  id: string
+  account: string
+  name: string
+  symbol: string
+  side: 'buy' | 'sell'
+  qty: number
+  status: PaperOrder['status']
+  order_type: PaperOrder['order_type']
+  fill_price?: number | null
+  created_at: string
+  filled_at?: string | null
+  /** 标的名称 (维表解析, 不可用时为空) */
+  symbol_name?: string
+  /** 最新快照价 / 涨跌幅 (行情不可用时为空, 前端退回成交价) */
+  last_price?: number | null
+  change_pct?: number | null
+}
+
+/** live-feed 全量口径统计 (items 只是最近流水窗口, 统计看这里)。 */
+export interface PaperLiveTotals {
+  /** 全部账户的订单总数 */
+  orders: number
+  buys: number
+  sells: number
+  /** 有过委托的账户数 */
+  active_accounts: number
 }
 
 export interface PaperAutoRule {
@@ -1380,6 +1434,90 @@ export interface PaperFill {
   factor?: number
   qty_before?: number
   cost_before?: number
+}
+
+/** 回放标的摘要 (GET /api/paper/replay/symbols) */
+export interface PaperReplaySymbol {
+  symbol: string
+  name: string
+  asset_type: string
+  market: 'cn' | 'hk' | 'us'
+  fills: number
+  buys: number
+  sells: number
+  first_date: string | null
+  last_date: string | null
+  last_side: 'buy' | 'sell' | null
+  realized_pnl: number
+}
+
+/** 回放成交行 (GET /api/paper/replay) */
+export interface PaperReplayFill {
+  seq: number | null
+  date: string
+  side: 'buy' | 'sell'
+  qty: number
+  price: number
+  fee: number
+  asset_type: string
+  order_id: string | null
+  source: string | null
+  reason: string | null
+  reason_label: string
+}
+
+/** 回放 K 线标记: 后端已解析买卖/除权语义, 前端只做渲染映射 */
+export interface PaperReplayMarker {
+  date: string
+  kind: 'buy' | 'sell' | 'neutral'
+  label: string
+  above: boolean
+  price?: number
+  qty?: number
+  side?: 'buy' | 'sell'
+  reason?: string | null
+  reason_label?: string
+  order_id?: string | null
+  factor?: number
+}
+
+export interface PaperReplaySummary {
+  buys: number
+  sells: number
+  buy_amount: number
+  sell_amount: number
+  fees: number
+  realized_pnl: number
+  win_rate: number | null
+  avg_holding_days: number | null
+  open_qty: number
+  rounds: number
+  corp_actions: number
+}
+
+export interface PaperReplayResponse {
+  account: string
+  account_name: string
+  symbol: string
+  name: string
+  asset_type: string
+  market: 'cn' | 'hk' | 'us'
+  start: string | null
+  end: string | null
+  strategy: {
+    strategy_id?: string | null
+    name?: string | null
+    source?: string | null
+    enabled?: boolean
+    status?: string | null
+    bound_at?: string | null
+  } | null
+  fills: PaperReplayFill[]
+  corp_actions: Array<{ date: string; factor?: number; qty_before?: number; cost_before?: number }>
+  markers: PaperReplayMarker[]
+  summary: PaperReplaySummary
+  total_fills: number
+  truncated: boolean
 }
 
 export interface VDBasicFilter {
@@ -2512,6 +2650,12 @@ export interface Preferences {
   system_notify_enabled: boolean
   feishu_webhook_url?: string
   feishu_webhook_secret?: string
+  /** 飞书自建应用机器人 (im/v1/messages) 的 App ID */
+  feishu_app_id?: string
+  /** 飞书应用机器人推送的目标群 chat_id */
+  feishu_app_chat_id?: string
+  /** App Secret 只回传是否已保存, 不回传明文 */
+  feishu_app_secret_set?: boolean
   wecom_webhook_url?: string
   custom_webhook_url?: string
   custom_webhook_secret_set?: boolean
@@ -2520,8 +2664,16 @@ export interface Preferences {
   wecom_bot_id?: string
   wecom_bot_secret?: string
   wecom_bot_enabled?: boolean
+  /** 智能机器人主动推送的目标会话 (群 chatid / 单聊 userid) */
+  wecom_bot_chat_id?: string
+  wecom_bot_chat_type?: number
+  /** 长连接从消息回调里发现的会话, 供选择推送目标 */
+  wecom_bot_chats?: Array<{ chat_id: string; chat_type?: string; last_seen?: string }>
   webhook_enabled_default?: boolean
+  /** 历史键: 设置页勾选=渠道启用 */
   webhook_default_channels?: string[]
+  /** 语义键: 全局启用的推送渠道 */
+  webhook_enabled_channels?: string[]
   nav_order: string[]
   nav_hidden: string[]
   nav_layout?: NavLayout | null
@@ -3208,6 +3360,20 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ url, secret }),
     }),
+  /** 飞书自建应用机器人: App ID + App Secret + 目标群 chat_id */
+  updateFeishuApp: (appId: string, chatId: string, secret?: string) =>
+    request<{ feishu_app_id: string; feishu_app_chat_id: string; feishu_app_secret_set: boolean }>(
+      '/api/settings/preferences/feishu-app',
+      {
+        method: 'PUT',
+        body: JSON.stringify({ app_id: appId, chat_id: chatId, ...(secret !== undefined ? { secret } : {}) }),
+      },
+    ),
+  /** 读取应用机器人已加入的群 (配置目标群时用) */
+  listFeishuAppChats: () =>
+    request<{ ok: boolean; detail: string; chats: { chat_id: string; name: string }[] }>(
+      '/api/settings/preferences/feishu-app-chats',
+    ),
   updateWecomWebhook: (url: string) =>
     request<{ wecom_webhook_url: string }>('/api/settings/preferences/wecom-webhook', {
       method: 'PUT',
@@ -3223,7 +3389,7 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ ...config, ...(password !== undefined ? { password } : {}) }),
     }),
-  sendTestWebhook: (channel: 'feishu' | 'wecom' | 'custom' | 'email') =>
+  sendTestWebhook: (channel: 'feishu' | 'wecom' | 'custom' | 'email' | 'feishu_app' | 'wecom_bot') =>
     request<{ ok: boolean; detail: string }>('/api/settings/preferences/webhook-test', {
       method: 'POST',
       body: JSON.stringify({ channel }),
@@ -3249,9 +3415,23 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
   updateWebhookDefaultChannels: (channels: string[]) =>
-    request<{ webhook_default_channels: string[] }>('/api/settings/preferences/webhook-default-channels', {
+    request<{ webhook_default_channels: string[]; webhook_enabled_channels: string[] }>('/api/settings/preferences/webhook-default-channels', {
       method: 'PUT',
       body: JSON.stringify({ channels }),
+    }),
+  /** 设置页勾选=启用推送渠道; 同后端接口, 仅命名更准确 */
+  updateWebhookEnabledChannels: (channels: string[]) =>
+    request<{ webhook_default_channels: string[]; webhook_enabled_channels: string[] }>('/api/settings/preferences/webhook-default-channels', {
+      method: 'PUT',
+      body: JSON.stringify({ channels }),
+    }),
+  /** 智能机器人已发现的会话 (来自用户 @机器人 / 单聊回调) */
+  listWecomBotChats: () =>
+    request<{ ok: boolean; chats: Array<{ chat_id: string; chat_type?: string; last_seen?: string }>; detail: string }>('/api/settings/preferences/wecom-bot-chats'),
+  updateWecomBotChat: (chatId: string, chatType?: number) =>
+    request<{ wecom_bot_chat_id: string; wecom_bot_chat_type: number }>('/api/settings/preferences/wecom-bot-chat', {
+      method: 'PUT',
+      body: JSON.stringify({ chat_id: chatId, chat_type: chatType }),
     }),
   updatePipelineSchedule: (hour: number, minute: number) =>
     request<{ hour: number; minute: number }>('/api/settings/preferences/pipeline-schedule', {
@@ -3411,9 +3591,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbols, date, ...(preferLocal ? { prefer_local: true } : {}), ...(since ? { since } : {}) }),
     }),
-  instrumentSearch: (q: string, limit = 20, assetTypes?: string) =>
-    request<{ results: { symbol: string; name: string; code: string; asset_type?: string }[] }>(
-      `/api/kline/instruments/search?q=${encodeURIComponent(q)}&limit=${limit}${assetTypes ? `&asset_types=${encodeURIComponent(assetTypes)}` : ''}`,
+  instrumentSearch: (q: string, limit = 20, assetTypes?: string, market?: string) =>
+    request<{ results: { symbol: string; name: string; code: string; asset_type?: string; market?: string }[] }>(
+      `/api/kline/instruments/search?q=${encodeURIComponent(q)}&limit=${limit}${assetTypes ? `&asset_types=${encodeURIComponent(assetTypes)}` : ''}${market ? `&market=${encodeURIComponent(market)}` : ''}`,
     ),
 
   /** 批量查股票名称 (传入 symbol 列表, 返回 {symbol: name}) */
@@ -3479,6 +3659,24 @@ export const api = {
     request<{ status: string; index_count: number; rows_written: number }>(
       `/api/index/sync_daily?days=${days}`,
       { method: 'POST' },
+    ),
+  // ===== 港美股市场指数（多市场扩展，market 参数路由） =====
+  marketIndexList: (market: 'hk' | 'us') =>
+    request<{ market: string; items: IndexInstrumentMarket[] }>(
+      `/api/indices/market?market=${encodeURIComponent(market)}`,
+    ),
+  marketIndexQuotes: (market: 'hk' | 'us') =>
+    request<{ rows: IndexQuote[]; count: number }>(
+      `/api/indices/market/quotes?market=${encodeURIComponent(market)}`,
+    ),
+  marketIndexDaily: (market: 'hk' | 'us', symbol: string, days = 180, dateRange?: { start: string; end: string }) =>
+    request<{ symbol: string; rows: KlineRow[]; index_info: { symbol: string; name: string } }>(
+      `/api/indices/market/daily?market=${encodeURIComponent(market)}&symbol=${encodeURIComponent(symbol)}&days=${days}` +
+        (dateRange ? `&start=${dateRange.start}&end=${dateRange.end}` : ''),
+    ),
+  marketIndexKline: (market: 'hk' | 'us', symbol: string, days = 250) =>
+    request<{ symbol: string; market: string; rows: KlineRow[] }>(
+      `/api/indices/market/kline?market=${encodeURIComponent(market)}&symbol=${encodeURIComponent(symbol)}&days=${days}`,
     ),
   syncSymbol: (symbol: string, days = 250) =>
     request<{ symbol: string; rows_written: number }>(
@@ -3624,18 +3822,20 @@ export const api = {
   watchlistClear: () =>
     request<{ removed: number }>('/api/watchlist', { method: 'DELETE' }),
   watchlistQuotes: () => request<{ quotes: Quote[] }>('/api/watchlist/quotes'),
-  watchlistEnriched: (extColumns?: string) =>
-    request<{
+  watchlistEnriched: (extColumns?: string, market?: string) => {
+    const params = new URLSearchParams()
+    if (extColumns) params.set('ext_columns', extColumns)
+    if (market) params.set('market', market)
+    const qs = params.toString()
+    return request<{
       rows: any[]
       as_of: string | null
       elapsed_ms: number
       /** 按资产类型的行情日期 (ISO); 缺失 (旧后端) 时前端按不新鲜处理 */
       dates?: { stock: string | null; etf: string | null; index: string | null }
-    }>(
-      extColumns
-        ? `/api/watchlist/enriched?ext_columns=${encodeURIComponent(extColumns)}`
-        : '/api/watchlist/enriched',
-    ),
+      market?: string
+    }>(qs ? `/api/watchlist/enriched?${qs}` : '/api/watchlist/enriched')
+  },
   watchlistPrepare: (symbols: string[]) => request<{ results: WatchlistPrepareResult[] }>(
     '/api/watchlist/prepare',
     { method: 'POST', body: JSON.stringify({ symbols }), timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, quiet: true },
@@ -3643,68 +3843,76 @@ export const api = {
   dataVersions: () => request<{ versions: Record<string, string> }>('/api/intraday/data-versions', { quiet: true }),
 
   // timeframe='all' 时不传参数 → 后端不过滤周期, 返回日线+分钟合并列表
-  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index', timeframe: '1d' | '1m' | 'all' = '1d') => {
+  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index', timeframe: '1d' | '1m' | 'all' = '1d', market = 'cn') => {
+    const params = new URLSearchParams({ market })
+    if (assetType) params.set('asset_type', assetType)
+    if (timeframe !== 'all') params.set('timeframe', timeframe)
     const data = await request<{
       strategies: StrategyDetail[]
       load_errors?: StrategyLoadError[]
       legacy_migration?: { seeded_signals?: number; seeded_strategies?: number; archived_files?: string[] }
-    }>(
-      `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}${timeframe !== 'all' ? `timeframe=${timeframe}` : ''}`,
-    )
+    }>(`/api/strategies?${params.toString()}`)
     return { presets: data.strategies, load_errors: data.load_errors, legacy_migration: data.legacy_migration }
   },
-  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d', ensure = false) =>
+  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d', ensure = false, market = 'cn') =>
     request<ScreenerResult>('/api/screener/run_preset', {
       method: 'POST',
       timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
-      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe, ensure }),
+      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe, ensure, market }),
     }),
-  screenerRunCustom: (conditions: string[], orderBy?: string, limit = 30, pool?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
+  screenerRunCustom: (conditions: string[], orderBy?: string, limit = 30, pool?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock', market = 'cn') =>
     request<ScreenerResult>('/api/screener/run', {
       method: 'POST',
       timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
-      body: JSON.stringify({ conditions, order_by: orderBy, limit, pool, ext_columns: extColumns || null, asset_type: assetType }),
+      body: JSON.stringify({ conditions, order_by: orderBy, limit, pool, ext_columns: extColumns || null, asset_type: assetType, market }),
     }),
-  screenerRunAll: (asOf?: string, strategyIds?: string[], assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d', ensure = false) =>
+  screenerRunAll: (asOf?: string, strategyIds?: string[], assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d', ensure = false, market = 'cn') =>
     request<ScreenerRunAllSummary>(
-      '/api/screener/run_all', { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe, summary_only: true, ensure }) },
+      '/api/screener/run_all', { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe, summary_only: true, ensure, market }) },
     ),
-  screenerCachedSummary: (taskId?: string) =>
-    request<ScreenerCachedSummary>('/api/screener/cached-summary' + (taskId ? `?task_id=${encodeURIComponent(taskId)}` : '')),
-  screenerCachedResult: (strategyId: string, extColumns?: string) =>
-    request<ScreenerCachedResult>(
-      extColumns
-        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
-        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
-    ),
-  screenerCached: (extColumns?: string) =>
-    request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
-      extColumns
-        ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
-        : '/api/screener/cached',
-    ),
-  marketSnapshot: () =>
-    request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
-  overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
+  screenerCachedSummary: (taskId?: string, market = 'cn') => {
+    const params = new URLSearchParams({ market })
+    if (taskId) params.set('task_id', taskId)
+    return request<ScreenerCachedSummary>(`/api/screener/cached-summary?${params.toString()}`)
+  },
+  screenerCachedResult: (strategyId: string, extColumns?: string, market = 'cn') => {
+    const params = new URLSearchParams({ market })
+    if (extColumns) params.set('ext_columns', extColumns)
+    return request<ScreenerCachedResult>(`/api/screener/cached-result/${encodeURIComponent(strategyId)}?${params.toString()}`)
+  },
+  screenerCached: (extColumns?: string, market = 'cn') => {
+    const params = new URLSearchParams({ market })
+    if (extColumns) params.set('ext_columns', extColumns)
+    return request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
+      `/api/screener/cached?${params.toString()}`,
+    )
+  },
+  marketSnapshot: (market = 'cn') =>
+    request<{ as_of: string | null; rows: MarketSnapshotRow[] }>(`/api/screener/market-snapshot?market=${market}`),
+  overviewMarket: (asOf?: string, market = 'cn') => {
+    const params = new URLSearchParams({ market })
+    if (asOf) params.set('as_of', asOf)
+    return request<OverviewMarket>(`/api/overview/market?${params.toString()}`)
+  },
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
-  rpsRotation: (days: number, kind?: 'concept' | 'industry', level?: number) =>
-    request<RpsRotationData>(`/api/rps/rotation?days=${days}${kind ? `&kind=${kind}` : ''}${level ? `&level=${level}` : ''}`),
+  rpsRotation: (days: number, kind?: 'concept' | 'industry', level?: number, market = 'cn') =>
+    request<RpsRotationData>(`/api/rps/rotation?days=${days}${kind ? `&kind=${kind}` : ''}${level ? `&level=${level}` : ''}&market=${market}`),
 
   // 市场环境(Regime)
-  regimeHistory: (start?: string, end?: string, limit?: number) => {
-    const params = new URLSearchParams()
+  regimeHistory: (start?: string, end?: string, limit?: number, market = 'cn') => {
+    const params = new URLSearchParams({ market })
     if (start) params.set('start', start)
     if (end) params.set('end', end)
     if (limit) params.set('limit', String(limit))
     const qs = params.toString()
     return request<RegimeHistory>(`/api/regime/history${qs ? `?${qs}` : ''}`)
   },
-  regimeLatest: () => request<{ row: RegimeRow | null }>('/api/regime/latest'),
-  regimeStates: (days = 60) => request<RegimeStates>(`/api/regime/states?days=${days}`),
-  regimeCoverage: () => request<RegimeCoverage>('/api/regime/coverage'),
-  regimeRecompute: (start?: string, end?: string) => {
-    const params = new URLSearchParams()
+  regimeLatest: (market = 'cn') => request<{ row: RegimeRow | null }>(`/api/regime/latest?market=${market}`),
+  regimeStates: (days = 60, market = 'cn') => request<RegimeStates>(`/api/regime/states?days=${days}&market=${market}`),
+  regimeCoverage: (market = 'cn') => request<RegimeCoverage>(`/api/regime/coverage?market=${market}`),
+  regimeRecompute: (start?: string, end?: string, market = 'cn') => {
+    const params = new URLSearchParams({ market })
     if (start) params.set('start', start)
     if (end) params.set('end', end)
     const qs = params.toString()
@@ -3743,8 +3951,8 @@ export const api = {
       body: JSON.stringify({ config }),
     }),
 
-  limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {
-    const params = new URLSearchParams()
+  limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down', market = 'cn') => {
+    const params = new URLSearchParams({ market })
     if (asOf) params.set('as_of', asOf)
     if (extColumns) params.set('ext_columns', extColumns)
     if (direction === 'down') params.set('direction', 'down')
@@ -4060,6 +4268,18 @@ export const api = {
   pipelineRun: () => request<{ job_id: string; reused: boolean }>(
     '/api/pipeline/run', { method: 'POST' },
   ),
+  /** 港美股数据同步 (维表缺失时自动补维表) → 日K → enriched; limit>0 只同步前 N 只 */
+  pipelineRunMarket: (market: string, limit = 0) =>
+    request<{ job_id: string; reused: boolean }>(
+      `/api/pipeline/run-market?market=${encodeURIComponent(market)}&limit=${limit}`,
+      { method: 'POST' },
+    ),
+  /** 只补「有日K、enriched 缺失」的标的指标 (差额补齐, 不重算已有指标) */
+  pipelineBackfillEnriched: (market: string, limit = 1000) =>
+    request<{ job_id: string; reused: boolean }>(
+      `/api/pipeline/backfill-enriched?market=${encodeURIComponent(market)}&limit=${limit}`,
+      { method: 'POST' },
+    ),
   /** 独立同步除权因子 (全历史 + 受影响个股 enriched 局部重算), 与管道共用任务槽 */
   pipelineAdjFactorRun: () => request<{ job_id: string; reused: boolean }>(
     '/api/pipeline/adj-factor/run', { method: 'POST' },
@@ -4074,6 +4294,9 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  /** 单市场数据画像: 维表只数/日K标的数/最新交易日 (港美股与 A 股共用存储, 需按市场切分) */
+  marketDataStatus: (market: string) =>
+    request<MarketDataStatus>(`/api/data/market-status?market=${encodeURIComponent(market)}`),
   dataIntegrity: () => request<{
     report: IntegrityReport | null
     blocking_assets?: IntegrityAsset[]
@@ -4143,8 +4366,8 @@ export const api = {
   },
 
   // ===== 板块切换 (盘中轮动) =====
-  sectorRotation: (params: { kind: 'concept' | 'industry'; flow?: string; top?: number; bucket?: number; seriesNames?: string[]; autoRows?: number; excludeSectors?: string[]; sortBy?: 'activity' | 'score' | 'pct' | 'rank_change' | 'momentum' | 'flow' }) => {
-    const query = new URLSearchParams({ kind: params.kind })
+  sectorRotation: (params: { kind: 'concept' | 'industry'; flow?: string; top?: number; bucket?: number; seriesNames?: string[]; autoRows?: number; excludeSectors?: string[]; sortBy?: 'activity' | 'score' | 'pct' | 'rank_change' | 'momentum' | 'flow'; market?: string }) => {
+    const query = new URLSearchParams({ kind: params.kind, market: params.market ?? 'cn' })
     if (params.flow) query.set('flow', params.flow)
     if (params.top != null) query.set('top', String(params.top))
     if (params.bucket != null) query.set('bucket', String(params.bucket))
@@ -4664,7 +4887,7 @@ export const api = {
    * AI 大盘复盘 — 流式调用(NDJSON,与个股/财务分析同协议)。
    * meta 里带 as_of / emotion_score / emotion_label / summary,供前端先渲染信号灯。
    */
-  async *reviewStream(asOf?: string, focus?: string): AsyncGenerator<{
+  async *reviewStream(asOf?: string, focus?: string, market = 'cn'): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done' | 'ping'
     as_of?: string
     emotion_score?: number
@@ -4676,7 +4899,7 @@ export const api = {
     const res = await fetch('/api/market-recap/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
+      body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '', market }),
     })
     if (!res.ok) {
       let detail = ''
@@ -4951,14 +5174,15 @@ export const api = {
     }),
 
   // ===== Abnormal Moves (异动监控: 竞价/盘中/偏移) =====
-  abnormalOverview: (minCloseness = 0.5, limit = 200) =>
+  // market 仅支持 cn: 异动口径依赖 A 股涨跌停/连板, 非 cn 后端明确 409。
+  abnormalOverview: (minCloseness = 0.5, limit = 200, market = 'cn') =>
     request<AbnormalOverview>(
-      `/api/abnormal/overview?min_closeness=${minCloseness}&limit=${limit}`,
+      `/api/abnormal/overview?min_closeness=${minCloseness}&limit=${limit}&market=${market}`,
     ),
 
   /** 盘中异动: enriched 当日信号命中行 (涨停/炸板/翘板/跌停/新高/新低/放量) */
-  abnormalIntraday: (limit = 500) =>
-    request<AbnormalIntradayPayload>(`/api/abnormal/intraday?limit=${limit}`),
+  abnormalIntraday: (limit = 500, market = 'cn') =>
+    request<AbnormalIntradayPayload>(`/api/abnormal/intraday?limit=${limit}&market=${market}`),
 
   // ===== Monitor Rules (监控规则) =====
   monitorRulesList: () =>
@@ -4996,7 +5220,7 @@ export const api = {
   paperOverview: (account?: string) =>
     request<PaperOverview>(accUrl('/api/paper/overview', account)),
 
-  paperCreateAccount: (body: { initial_cash: number; account_id?: string; name?: string; commission_pct?: number; stamp_tax_pct?: number; slippage_bps?: number; queue_limit_orders?: boolean }) =>
+  paperCreateAccount: (body: { initial_cash: number; account_id?: string; name?: string; market?: 'cn' | 'hk' | 'us'; commission_pct?: number; stamp_tax_pct?: number; slippage_bps?: number; queue_limit_orders?: boolean }) =>
     request<{ account: PaperAccount }>('/api/paper/account', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -5027,6 +5251,19 @@ export const api = {
 
   paperTrades: (account?: string) =>
     request<{ fills: PaperFill[] }>(accUrl('/api/paper/trades', account)),
+  paperReplaySymbols: (account?: string) =>
+    request<{ symbols: PaperReplaySymbol[] }>(accUrl('/api/paper/replay/symbols', account)),
+  paperReplay: (
+    symbol: string,
+    opts: { start?: string; end?: string; limit?: number; account?: string } = {},
+  ) => {
+    const q = new URLSearchParams({ symbol })
+    if (opts.start) q.set('start', opts.start)
+    if (opts.end) q.set('end', opts.end)
+    if (opts.limit) q.set('limit', String(opts.limit))
+    if (opts.account) q.set('account', opts.account)
+    return request<PaperReplayResponse>(`/api/paper/replay?${q.toString()}`)
+  },
 
   paperNav: (account?: string) =>
     request<{ nav: Array<{ date: string; cash: number; mv: number; nav: number }> }>(accUrl('/api/paper/nav', account)),
@@ -5039,6 +5276,10 @@ export const api = {
 
   paperCompare: () =>
     request<{ accounts: PaperCompareRow[] }>('/api/paper/compare'),
+
+  /** 跨账户最近撮合流水 (实时行情带, 3~30s Redis 缓存) */
+  paperLiveFeed: (limit = 40) =>
+    request<{ items: PaperLiveItem[]; count: number; totals?: PaperLiveTotals }>(`/api/paper/live-feed?limit=${limit}`),
 
   paperFreeze: (frozen: boolean, account?: string) =>
     request<{ account: PaperAccount }>(accUrl('/api/paper/freeze?frozen=' + frozen, account), { method: 'POST' }),
@@ -5063,7 +5304,7 @@ export const api = {
     request<{ ok: boolean }>(accUrl(`/api/paper/auto_rules/${encodeURIComponent(id)}`, account), { method: 'DELETE' }),
 
   /** 对比批量创建: 同本金/同费率一次开 N 个账户, 各绑一条自动跟单规则 */
-  paperArenaCreate: (body: { initial_cash: number; sources: PaperArenaSource[]; name_prefix?: string; commission_pct?: number; stamp_tax_pct?: number; slippage_bps?: number }) =>
+  paperArenaCreate: (body: { initial_cash: number; sources: PaperArenaSource[]; name_prefix?: string; market?: 'cn' | 'hk' | 'us'; commission_pct?: number; stamp_tax_pct?: number; slippage_bps?: number }) =>
     request<{ created: Array<{ account: string; name: string; rule_id: string }> }>('/api/paper/arena/batch_create', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -5268,6 +5509,24 @@ export interface PipelineJob {
 export type PipelineJobSummary = Omit<PipelineJob, 'log'>
 
 // ===== Data status =====
+export interface MarketDataStatus {
+  market: string
+  label: string
+  /** 个股维表行数 */
+  instruments: number
+  /** 日K中该市场标的数 */
+  symbols: number
+  /** enriched 中该市场标的数 */
+  enriched_symbols: number
+  /** 该市场最新交易日 */
+  latest_date: string | null
+  /** 最近一次同步完成时间 (UTC ISO) */
+  last_sync_run: string | null
+  /** 定时同步下次执行时间 (ISO, APScheduler) */
+  next_sync_run: string | null
+  has_data: boolean
+  supported_markets: string[]
+}
 export type IntegrityAsset = 'stock' | 'etf' | 'index'
 export type DailyDataRevisions = Partial<Record<IntegrityAsset, string>>
 

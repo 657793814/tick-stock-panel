@@ -68,6 +68,28 @@ def test_arena_batch_create_accounts_and_rules(tmp_path: Path):
     assert row["auto_rules"][0]["match_id"] == "sg_macd_golden" and row["auto_rules"][0]["enabled"] is True
 
 
+def test_arena_batch_create_market_and_default_fees(tmp_path: Path):
+    """批量创建的 market 必须真正落账户；缺省印花税按市场口径，非法市场 400。"""
+    c = _client(tmp_path)
+    r = c.post("/api/paper/arena/batch_create", json={
+        "initial_cash": 200000,
+        "market": "us",
+        "sources": [{"match_kind": "strategy", "match_id": "sg_macd_golden"}],
+    })
+    assert r.status_code == 200, r.text
+    acc_id = r.json()["created"][0]["account"]
+    acc = c.get(f"/api/paper/account?account={acc_id}").json()["account"]
+    assert acc["market"] == "us"
+    assert acc["stamp_tax_pct"] == 0.0
+
+    bad = c.post("/api/paper/arena/batch_create", json={
+        "initial_cash": 200000,
+        "market": "xx",
+        "sources": [{"match_kind": "strategy", "match_id": "sg_macd_golden"}],
+    })
+    assert bad.status_code == 400
+
+
 def test_arena_batch_create_validates_before_writing(tmp_path: Path):
     """任一来源非法 → 400 且不产生任何账户/规则 (fail-closed, 无半创建)。"""
     c = _client(tmp_path)

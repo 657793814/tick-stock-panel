@@ -99,8 +99,8 @@ it('当前状态与分布直接显示真实数值, 切换范围同步刷新原�
   const ring = fixtures.charts.find(chart => chart.option?.series?.some((series: any) => series.type === 'pie'))
   expect(ring?.option.series[0].data.map((item: { value: number }) => item.value)).toEqual([2, 3])
   await click('2年')
-  expect(api.regimeHistory).toHaveBeenLastCalledWith(undefined, undefined, 500)
-  expect(api.regimeStates).toHaveBeenLastCalledWith(500)
+  expect(api.regimeHistory).toHaveBeenLastCalledWith(undefined, undefined, 500, 'cn')
+  expect(api.regimeStates).toHaveBeenLastCalledWith(500, 'cn')
 })
 
 it('键盘切换页签后保留图例选择和图表窗口', async () => {
@@ -143,8 +143,8 @@ it('自定义范围仍按交易日提交, 日历展开可收回', async () => {
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
   await click('应用')
-  expect(api.regimeHistory).toHaveBeenLastCalledWith(undefined, undefined, 90)
-  expect(api.regimeStates).toHaveBeenLastCalledWith(90)
+  expect(api.regimeHistory).toHaveBeenLastCalledWith(undefined, undefined, 90, 'cn')
+  expect(api.regimeStates).toHaveBeenLastCalledWith(90, 'cn')
   await click('展开全部月份')
   expect(panel().querySelector('[aria-controls="regime-calendar"]')?.getAttribute('aria-expanded')).toBe('true')
   await click('收起月份')
@@ -167,7 +167,7 @@ it('容器尺寸变化触发图表重排, 空数据后重新挂载不引用已�
   const before = chart.resize.mock.calls.length
   await act(async () => fixtures.resizes.forEach(resize => resize()))
   expect(chart.resize.mock.calls.length).toBeGreaterThan(before)
-  await act(async () => client.setQueryData(QK.regimeHistory({ limit: 250 }), { rows: [], total: 0 }))
+  await act(async () => client.setQueryData(QK.regimeHistory({ limit: 250 }, 'cn'), { rows: [], total: 0 }))
   await settle()
   expect(chart.disposed).toBe(true)
   await act(async () => client.setQueryData(QK.regimeHistory({ limit: 250 }), { rows, total: rows.length }))

@@ -131,6 +131,93 @@ async def run_adj_factor_now(request: Request) -> dict:
     )
 
 
+@router.post("/run-market")
+async def run_market_now(request: Request, market: str = "cn", limit: int = 0,
+                         refresh_synced: bool = False, count_days: int = 400) -> dict:
+    """异步触发港美股数据同步 + enriched 计算（多市场扩展，对应参考 run-market）。
+
+    market 默认 "cn"（A 股恒走 /run）；支持 app.markets.ALL_MARKETS 中的
+    cn / hk / us。非法市场 400。返回 job_id，进度经 /api/pipeline/jobs/{id} 轮询。
+    实际执行在后台 executor，与 A 股管道共用单飞 / 重任务槽（共享单飞防并发覆写）。
+
+    limit: >0 时只同步前 limit 只标的（美股全量 1.2 万只，试跑时可先取一小批）。
+    refresh_synced: 增量模式，只刷新同步账本里已同步过的标的（与定时任务同路径），
+        补「某日缺一天」这类场景用它，不必全量重拉。
+    count_days: 回溯自然日数，默认 400（全历史重建）；增量补日一般 10~30 足够。
+    """
+    from app.markets import ALL_MARKETS
+
+    if market not in ALL_MARKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法市场 '{market}', 支持: {', '.join(ALL_MARKETS)}",
+        )
+    repo = request.app.state.repo
+    capset = getattr(request.app.state, "capabilities", None)
+    days = max(5, min(4000, int(count_days)))
+    return await _submit_job(
+        repo,
+        getattr(request.app.state, "quote_service", None),
+        lambda progress: (lambda: daily_pipeline.run_market_sync(
+            market, repo, on_progress=progress, capset=capset,
+            max_symbols=limit if limit > 0 else None,
+            count_days=days, refresh_synced=refresh_synced,
+        )),
+    )
+
+
+@router.post("/backfill-enriched")
+async def backfill_enriched(request: Request, market: str = "cn", limit: int = 1000) -> dict:
+    """补齐「有日K、但 enriched 缺失」的标的（多市场扩展）。
+
+    港美股分批同步时, 某批日K 落盘而指标计算失败/超时, 这批标的就只剩日K:
+    选股/看板读 enriched 全为空, 而数据状态条显示「日K 1.1 万 / 指标 2 千」。
+    全量重算 (POST /api/kline/rebuild_enriched) 会把已有指标一起重算, 美股很慢;
+    本端点只算差额, limit 控制单轮规模 (美股余量大时可重复调用推进; 默认 1000 只/轮)。
+
+    返回 job_id, 进度经 /api/pipeline/jobs/{id} 轮询。
+    """
+    from app.markets import ALL_MARKETS
+
+    if market not in ALL_MARKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法市场 '{market}', 支持: {', '.join(ALL_MARKETS)}",
+        )
+    from app.services import enriched_backfill
+
+    repo = request.app.state.repo
+    return await _submit_job(
+        repo,
+        getattr(request.app.state, "quote_service", None),
+        lambda progress: (lambda: enriched_backfill.backfill(
+            repo, market, limit=max(1, limit), on_progress=progress,
+        )),
+    )
+
+
+@router.post("/repair-enriched-schema")
+async def repair_enriched_schema(request: Request) -> dict:
+    """修复 enriched 分区的列类型漂移（多市场扩展）。
+
+    港美股早期写入的连板数是 Int32, 与存储 schema 的 UInt32 不一致; 两者共用
+    kline_daily_enriched, 按 schema 扫描的读方会整次失败 (港股日K/均线读不出)。
+    写入侧已修, 本端点修存量: 逐分区 cast 回声明类型后走正常 merge-upsert 重写。
+
+    幂等: 已对齐的分区只读不写。返回 job_id。
+    """
+    from app.services import market_schema_repair
+
+    repo = request.app.state.repo
+    return await _submit_job(
+        repo,
+        getattr(request.app.state, "quote_service", None),
+        lambda progress: (lambda: market_schema_repair.repair_enriched_dtypes(
+            repo, on_progress=progress,
+        )),
+    )
+
+
 @router.get("/jobs/{job_id}")
 def get_job(job_id: str) -> dict:
     # 每次轮询都检查卡死 job — 前端持续轮询, 进度停滞超阈值后必定自愈,

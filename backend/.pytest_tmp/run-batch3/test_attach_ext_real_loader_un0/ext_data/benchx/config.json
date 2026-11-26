@@ -1,0 +1,18 @@
+{
+  "id": "benchx",
+  "label": "基准扩展",
+  "mode": "snapshot",
+  "fields": [
+    {
+      "name": "score",
+      "dtype": "float",
+      "label": "score"
+    }
+  ],
+  "description": "",
+  "symbol_map": {},
+  "code_map": {},
+  "market_level": false,
+  "created_at": "2026-11-23T18:37:14.086417",
+  "updated_at": "2026-11-23T18:37:14.086423"
+}

@@ -30,6 +30,8 @@ import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { toast } from '@/components/Toast'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { useReviewState } from '@/lib/useReviewStore'
+import { useMarket } from '@/lib/market'
+import { MarketNotSupportedHint } from '@/components/MarketNotSupported'
 import {
   startReviewGeneration, resetReview, isReviewGenerating, cancelReviewGeneration,
   type ReviewPhase,
@@ -70,6 +72,7 @@ function fmtArchivedAt(iso: string): string {
 
 export function ReviewPage() {
   const qc = useQueryClient()
+  const { market } = useMarket()
   // 复盘日期:当前固定取最新交易日(后续如需日期选择可改回 useState)
   const asOf: string | undefined = undefined
   const [focus, setFocus] = useState('')
@@ -80,8 +83,8 @@ export function ReviewPage() {
 
   // 看板数据(与总览页同源)
   const marketQuery = useQuery<OverviewMarket>({
-    queryKey: QK.overviewMarket(asOf),
-    queryFn: () => api.overviewMarket(asOf),
+    queryKey: QK.overviewMarket(asOf, market),
+    queryFn: () => api.overviewMarket(asOf, market),
     staleTime: 5_000,
     placeholderData: (prev) => prev,
   })
@@ -106,7 +109,10 @@ export function ReviewPage() {
   const prefs = usePreferences()
   const reviewSched = prefs.data?.review_schedule ?? { enabled: false, hour: 15, minute: 10 }
   const feishuConfigured = !!(prefs.data?.feishu_webhook_url)
+  const feishuAppConfigured = !!(prefs.data?.feishu_app_id && prefs.data?.feishu_app_secret_set && prefs.data?.feishu_app_chat_id)
   const wecomConfigured = !!(prefs.data?.wecom_webhook_url)
+  const wecomBotConfigured = !!(prefs.data?.wecom_bot_id && prefs.data?.wecom_bot_secret && prefs.data?.wecom_bot_chat_id)
+  const enabledChannels = prefs.data?.webhook_enabled_channels ?? prefs.data?.webhook_default_channels ?? []
   const customConfigured = !!(prefs.data?.custom_webhook_url)
   const emailConfigured = !!(
     prefs.data?.email_smtp_config?.host
@@ -223,8 +229,8 @@ export function ReviewPage() {
     resetReview()
     startReviewGeneration(asOf, focus, (full, doneMeta) => {
       onGenerationDone(full, doneMeta).catch(() => { /* 静默 */ })
-    })
-  }, [asOf, focus, onGenerationDone])
+    }, market)
+  }, [asOf, focus, onGenerationDone, market])
 
   // 复制全文到剪贴板(viewing 优先,与主区域显示一致)
   const copyContent = useCallback(async () => {
@@ -267,6 +273,18 @@ export function ReviewPage() {
   // 主区域显示的内容:viewing(查看历史)优先于 store 的生成 content,
   // 这样点历史报告不会覆盖后台生成中的流。
   const displayContent = viewing?.content ?? content
+
+  if (market !== 'cn') {
+    return (
+      <div className="min-h-full bg-base">
+        <PageHeader title="AI 复盘" titleExtra={<Sparkles className="h-4 w-4 text-accent" />} />
+        <MarketNotSupportedHint
+          pageName="AI 大盘复盘"
+          reason="当前仅支持 A 股涨停/连板口径，港美股会由后端明确拒绝生成"
+        />
+      </div>
+    )
+  }
 
   return (
     <>
@@ -495,6 +513,26 @@ export function ReviewPage() {
                       {feishuConfigured ? '已配置' : '未配置'}
                     </span>
                   </button>
+                  <button
+                    type="button"
+                    disabled={pushMut.isPending}
+                    onClick={() => togglePushChannel('feishu_app')}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-btn border px-2.5 py-1.5 text-left transition-colors disabled:opacity-50',
+                      reviewPushChannels.includes('feishu_app')
+                        ? 'border-accent/40 bg-accent/10'
+                        : 'border-border/60 bg-base/40 hover:bg-base/60',
+                    )}
+                  >
+                    <span className={cn('flex h-3 w-3 shrink-0 items-center justify-center rounded border', reviewPushChannels.includes('feishu_app') ? 'border-accent bg-accent text-white' : 'border-border')}>
+                      {reviewPushChannels.includes('feishu_app') && <Check className="h-2.5 w-2.5" />}
+                    </span>
+                    <span className="text-[11px] text-foreground">飞书</span>
+                    <span className="text-[9px] text-muted">智能机器人(应用)</span>
+                    <span className={cn('ml-auto text-[9px]', feishuAppConfigured && enabledChannels.includes('feishu_app') ? 'text-emerald-500' : 'text-warning')}>
+                      {!enabledChannels.includes('feishu_app') ? '未启用' : (feishuAppConfigured ? '已配置' : '未配置')}
+                    </span>
+                  </button>
                   {/* 企业微信(可用, 多选) */}
                   <button
                     type="button"
@@ -514,6 +552,26 @@ export function ReviewPage() {
                     <span className="text-[9px] text-muted">群推送 Webhook</span>
                     <span className={cn('ml-auto text-[9px]', wecomConfigured ? 'text-emerald-500' : 'text-warning')}>
                       {wecomConfigured ? '已配置' : '未配置'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={pushMut.isPending}
+                    onClick={() => togglePushChannel('wecom_bot')}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-btn border px-2.5 py-1.5 text-left transition-colors disabled:opacity-50',
+                      reviewPushChannels.includes('wecom_bot')
+                        ? 'border-accent/40 bg-accent/10'
+                        : 'border-border/60 bg-base/40 hover:bg-base/60',
+                    )}
+                  >
+                    <span className={cn('flex h-3 w-3 shrink-0 items-center justify-center rounded border', reviewPushChannels.includes('wecom_bot') ? 'border-accent bg-accent text-white' : 'border-border')}>
+                      {reviewPushChannels.includes('wecom_bot') && <Check className="h-2.5 w-2.5" />}
+                    </span>
+                    <span className="text-[11px] text-foreground">企业微信</span>
+                    <span className="text-[9px] text-muted">智能机器人</span>
+                    <span className={cn('ml-auto text-[9px]', wecomBotConfigured && enabledChannels.includes('wecom_bot') ? 'text-emerald-500' : 'text-warning')}>
+                      {!enabledChannels.includes('wecom_bot') ? '未启用' : (wecomBotConfigured ? '已配置' : '未配置')}
                     </span>
                   </button>
                   <button

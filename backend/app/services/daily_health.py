@@ -13,6 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from app.enriched_generation import EnrichedGenerationUnavailableError
+from app.markets import ALL_MARKETS, MARKET_CN, market_of
 from app.services.fs_utils import atomic_write_text
 
 ASSET_LABELS = {"stock": "股票", "etf": "ETF", "index": "指数"}
@@ -39,6 +40,8 @@ def _read(path: str, mtime: int, size: int) -> dict:
             date.fromisoformat(entry["day"])
             if entry["symbol"] is not None and not isinstance(entry["symbol"], str):
                 raise ValueError("invalid symbol")
+            if entry.get("market") not in (None, *ALL_MARKETS):
+                raise ValueError("invalid market")
             if (not isinstance(entry["needs_raw"], bool)
                     or not isinstance(entry.get("needs_enriched", True), bool)
                     or entry["kind"] not in {"missing", "snapshot", "corrupt", "invalid"}
@@ -74,6 +77,18 @@ def _key(entry: dict):
     return entry["asset_type"], entry["day"], entry["symbol"]
 
 
+def _entry_market(entry: dict) -> str | None:
+    """条目的市场归属。旧状态文件没有 market 字段时按 symbol 后缀推导。
+
+    无法定位 symbol 的整日/整类异常没有市场归属 (None), 对所有市场生效。
+    """
+    market = entry.get("market")
+    if market in ALL_MARKETS:
+        return market
+    symbol = entry.get("symbol")
+    return market_of(symbol) if symbol else None
+
+
 def _save(root: Path, old: dict, entries: list[dict]) -> None:
     entries.sort(key=lambda e: (e["asset_type"], e["day"], e["symbol"] or ""))
     if entries == old["entries"]:
@@ -97,7 +112,8 @@ def _issue_entries(issues) -> dict:
             continue
         for symbol in issue.symbols or (None,):
             entry = {"asset_type": TABLE_FAMILY[issue.table], "day": issue.day.isoformat(),
-                     "symbol": symbol, "needs_raw": True, "needs_enriched": True,
+                     "symbol": symbol, "market": market_of(symbol) if symbol else None,
+                     "needs_raw": True, "needs_enriched": True,
                      "kind": issue.kind, "reason": issue.reason}
             found[_key(entry)] = entry
     return found
@@ -176,11 +192,19 @@ def clear_assets(root: Path, assets: set[str]) -> None:
 
 def assert_usable(
     root: Path, asset_type: str = "stock", *, symbols: list[str] | None = None, end: date | None = None,
-    enriched_only: bool = False,
+    enriched_only: bool = False, market: str | None = MARKET_CN,
 ) -> None:
+    """校验目标市场没有未完成的日K修补/重算。
+
+    market 默认 cn: A 股 enriched/选股/回测路径不应被单条港美股实时快照阻断
+    (共享 kline_daily, 港美股快照由腾讯源写入)。传 None 表示检查所有市场;
+    无法定位 symbol 的条目没有市场归属, 对所有市场生效。
+    """
     end = end or date.max
     for entry in snapshot(root)["entries"]:
         if enriched_only and not entry["needs_raw"] and not entry.get("needs_enriched", True):
+            continue
+        if market is not None and _entry_market(entry) not in (market, None):
             continue
         dependency = entry["asset_type"] == "index" and asset_type in {"stock", "etf"}
         if ((entry["asset_type"] == asset_type or dependency) and entry["day"] <= end.isoformat()

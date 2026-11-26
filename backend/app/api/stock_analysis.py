@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.indicators.levels import compute_levels, summarize_levels
+from app.markets import get_market
 from app.market_time import cn_today
 from app.services import stock_reports
 from app.services.ndjson_heartbeat import with_heartbeat
@@ -109,6 +110,7 @@ def get_levels(
     request: Request,
     symbol: str = Query(..., description="标的代码,如 000001.SZ"),
     days: int = Query(120, ge=30, le=500, description="计算样本天数"),
+    market: str = Query("cn", description="市场,默认 cn;hk/us 按市场维表路由标的,日K走共享存储"),
 ):
     """计算 11 类关键价位(成交密集区压力支撑 / 枢轴点 / 前高前低 /
     布林带 / Keltner短中长 / ATR止损 / 缺口 / 斐波那契 / 整数关口)。
@@ -116,9 +118,17 @@ def get_levels(
     返回 {levels: {sr, pivot, extreme, boll, keltner_s, keltner_m, keltner_l,
     atr_stop, gap, fib, round}, close, summary, dates, series}。
     前端按 levels 的 key 渲染开关按钮,逐组显隐 markLine / 曲线。
+
+    市场路由: cn 走 A股原路径; hk/us 按 market 校验(注册表/维表),
+    日K/enriched 走共享存储(本地港美股日K/enriched 复用单一存储的现状适配)。
     """
     if not symbol:
         raise HTTPException(400, "symbol 不能为空")
+
+    # 市场校验: 港美股按市场注册表路由, 非法市场直接拒绝
+    market_meta = get_market(market)
+    if market_meta is None:
+        raise HTTPException(400, f"非法市场: {market}(可选 cn/hk/us)")
 
     repo = request.app.state.repo
     end = cn_today()

@@ -130,6 +130,10 @@ class MatcherConfig:
     fees_pct: float = 0.0002
     commission_pct: float | None = None
     stamp_tax_pct: float | None = None
+    # 市场 (cn|hk|us)。显式给定后, 印花税按 app.markets.stamp_tax_for 市场口径覆盖
+    # 策略配置的 stamp_tax_pct (港美股无涨跌停/单独维表, 印花税规则随市场走)。
+    # 不传时行为与现有一致 (A 股默认单边 0.0005 或策略自定义值)。
+    market: str | None = None
     slippage_bps: float = 5.0
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
@@ -165,13 +169,29 @@ class MatcherConfig:
         # commission_pct 显式给出时优先, 否则回退 fees_pct (向后兼容双边佣金)。
         return self.commission_pct if self.commission_pct is not None else self.fees_pct
 
+    def _stamp_tax_pct(self, market: str | None = None) -> float:
+        # 显式市场且为港/美时, 按 app.markets.stamp_tax_for 该市场口径覆盖策略自定义值
+        # (hk 双边各 0.001, us 为 0)。A 股 (含未传 market) 沿用自定义值, 历史结果不变。
+        if market is None or market == "cn":
+            return self.stamp_tax_pct if self.stamp_tax_pct is not None else 0.0
+        from app.markets import stamp_tax_for
+        return stamp_tax_for(market)
+
+    def _buy_stamp_tax_pct(self) -> float:
+        """买入腿印花税: 只有双边征收的市场 (港股) 才计; A 股/美股买入不缴。"""
+        if self.market is None or self.market == "cn":
+            return 0.0
+        from app.markets import stamp_tax_double_sided, stamp_tax_for
+        return stamp_tax_for(self.market) if stamp_tax_double_sided(self.market) else 0.0
+
     def buy_cost_pct(self) -> float:
-        # 买入腿: 佣金 + 滑点。
-        return self._commission_pct() + self.slippage_bps / 10000.0
+        # 买入腿: 佣金 + 滑点; 港股等双边征收市场再叠加买入侧印花税。
+        return self._commission_pct() + self._buy_stamp_tax_pct() + self.slippage_bps / 10000.0
 
     def sell_cost_pct(self) -> float:
-        # 卖出腿: 佣金 + 印花税 + 滑点。印花税未设时为 0 (向后兼容)。
-        stamp = self.stamp_tax_pct if self.stamp_tax_pct is not None else 0.0
+        # 卖出腿: 佣金 + 印花税 + 滑点。印花税未设时 0 (向后兼容)。
+        # 显式市场时按市场印花税口径计入。
+        stamp = self._stamp_tax_pct(self.market)
         return self._commission_pct() + stamp + self.slippage_bps / 10000.0
 
 

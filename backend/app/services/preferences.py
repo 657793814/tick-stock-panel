@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -729,7 +730,7 @@ def set_depth_finalize_time(hour: int, minute: int) -> dict:
 
 # 监控与复盘共用的外部推送渠道白名单。
 # 多选: 不推送 = 空数组, 而非 'none'
-PUSH_CHANNELS = {"feishu", "wecom", "custom", "email"}
+PUSH_CHANNELS = {"feishu", "wecom", "custom", "email", "feishu_app", "wecom_bot"}
 
 
 def get_review_schedule() -> dict:
@@ -1047,6 +1048,28 @@ def set_feishu_webhook_secret(secret: str) -> str:
     return get_feishu_webhook_secret()
 
 
+def get_feishu_app_id() -> str:
+    """飞书自建应用的 App ID — 应用机器人推送(im/v1/messages)用。"""
+    return load().get("feishu_app_id", "")
+
+
+def set_feishu_app_id(app_id: str) -> str:
+    """保存飞书应用 App ID。传入空串表示清空配置。"""
+    save({"feishu_app_id": str(app_id or "").strip()})
+    return get_feishu_app_id()
+
+
+def get_feishu_app_chat_id() -> str:
+    """飞书应用机器人的目标群 chat_id (机器人需已加入该群)。"""
+    return load().get("feishu_app_chat_id", "")
+
+
+def set_feishu_app_chat_id(chat_id: str) -> str:
+    """保存目标群 chat_id。传入空串表示清空配置。"""
+    save({"feishu_app_chat_id": str(chat_id or "").strip()})
+    return get_feishu_app_chat_id()
+
+
 def get_wecom_webhook_url() -> str:
     """企业微信群推送 Webhook 地址 — 与飞书并列的第二推送通道。
 
@@ -1167,6 +1190,87 @@ def set_wecom_bot_enabled(enabled: bool) -> bool:
     return get_wecom_bot_enabled()
 
 
+def get_wecom_bot_chat_id() -> str:
+    """智能机器人主动推送的目标会话 ID (群聊 chatid / 单聊 userid)。"""
+    return str(load().get("wecom_bot_chat_id", "") or "").strip()
+
+
+def set_wecom_bot_chat_id(chat_id: str, chat_type: int | None = None) -> str:
+    """保存主动推送目标会话。chat_type: 1=单聊, 2=群聊, 0/None=兼容。"""
+    value = str(chat_id or "").strip()
+    payload: dict = {"wecom_bot_chat_id": value}
+    if chat_type is not None:
+        try:
+            payload["wecom_bot_chat_type"] = int(chat_type)
+        except (TypeError, ValueError):
+            payload["wecom_bot_chat_type"] = 0
+    save(payload)
+    return value
+
+
+def get_wecom_bot_chat_type() -> int:
+    """目标会话类型: 1 单聊 / 2 群聊 / 0 兼容。"""
+    try:
+        return int(load().get("wecom_bot_chat_type", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_wecom_bot_chats() -> list[dict]:
+    """已发现的会话列表 (来自机器人收到的消息回调)。
+
+    长连接协议没有「拉取会话列表」接口 — chatid 只能从用户 @机器人 / 单聊
+    的回调里拿到。服务收到回调时调用 remember_wecom_bot_chat 写入这里。
+    """
+    raw = load().get("wecom_bot_chats") or []
+    if not isinstance(raw, list):
+        return []
+    chats: list[dict] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        chat_id = str(item.get("chat_id") or "").strip()
+        if not chat_id or chat_id in seen:
+            continue
+        seen.add(chat_id)
+        chats.append({
+            "chat_id": chat_id,
+            "chat_type": item.get("chat_type", ""),
+            "last_seen": item.get("last_seen", ""),
+        })
+    return chats
+
+
+def remember_wecom_bot_chat(chat_id: str, chat_type: str = "", *, now: float | None = None) -> list[dict]:
+    """记录/刷新一个会话。同一 chatid 1 分钟内不重复落盘。"""
+    chat_id = str(chat_id or "").strip()
+    if not chat_id:
+        return get_wecom_bot_chats()
+    ts = time.time() if now is None else now
+    chats = get_wecom_bot_chats()
+    for item in chats:
+        if item["chat_id"] == chat_id:
+            try:
+                recent = ts - float(item.get("_ts") or 0)
+            except (TypeError, ValueError):
+                recent = 999
+            if recent < 60:
+                return chats
+            item["chat_type"] = chat_type or item.get("chat_type", "")
+            item["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+            item["_ts"] = ts
+            save({"wecom_bot_chats": chats})
+            return chats
+    chats.append({
+        "chat_id": chat_id,
+        "chat_type": chat_type,
+        "last_seen": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)),
+        "_ts": ts,
+    })
+    save({"wecom_bot_chats": chats[-20:]})
+    return get_wecom_bot_chats()[-20:]
+
 
 def get_webhook_enabled_default() -> bool:
     """新建监控规则时是否默认勾选推送 (老布尔, 已由 webhook_default_channels 取代)。
@@ -1186,10 +1290,14 @@ def set_webhook_enabled_default(enabled: bool) -> bool:
 
 
 def get_webhook_default_channels() -> list[str]:
-    """新建监控规则时默认勾选的推送渠道 (多选)。
+    """全局启用的推送渠道 (多选)。
 
-    空列表 = 新建规则默认不推送; ['feishu'] = 默认推飞书。
-    此默认值供规则编辑器新建规则时预填, 单条规则仍可独立修改。
+    这是设置页勾选的语义: 勾选=该渠道打开并允许推送, 取消=全局关闭。
+    新建规则会预填这里已启用的渠道, 单条规则仍可独立增删;
+    后端分发时只投递「全局启用 + 规则勾选 + 渠道已配置」的组合。
+
+    存储键沿用 webhook_default_channels (历史兼容), 新代码请用语义更准确的
+    get_webhook_enabled_channels / set_webhook_enabled_channels。
 
     向后兼容: 老版本只有布尔 webhook_enabled_default (勾选即飞书+企业微信双推),
     这里把 True 迁移为 ['feishu','wecom'], 还原当时的实际行为。
@@ -1205,15 +1313,36 @@ def get_webhook_default_channels() -> list[str]:
 
 
 def set_webhook_default_channels(channels: list[str]) -> list[str]:
-    """保存新建规则默认推送渠道 (多选)。过滤白名单外、去重、保序。空列表 = 不推送。"""
+    """保存全局启用的推送渠道。过滤白名单外、去重、保序。空列表 = 全部关闭。"""
     seen: set[str] = set()
     cleaned: list[str] = []
     for c in channels or []:
         if c in PUSH_CHANNELS and c not in seen:
             seen.add(c)
             cleaned.append(c)
-    save({"webhook_default_channels": cleaned})
+    # 新旧键同步写, 保证老前端/老规则迁移与新语义一致
+    save({"webhook_default_channels": cleaned, "webhook_enabled_channels": cleaned})
     return cleaned
+
+
+def get_webhook_enabled_channels() -> list[str]:
+    """全局启用的推送渠道 — 设置页勾选的真实语义。
+
+    新键 webhook_enabled_channels 优先; 老安装没有新键时沿用 webhook_default_channels;
+    两者都没有则不限制(默认全部视为启用, 但未配置的渠道仍然投递不了)。
+    """
+    d = load()
+    raw = d.get("webhook_enabled_channels")
+    if isinstance(raw, list):
+        return [c for c in raw if c in PUSH_CHANNELS]
+    if isinstance(d.get("webhook_default_channels"), list):
+        return get_webhook_default_channels()
+    return sorted(PUSH_CHANNELS)
+
+
+def set_webhook_enabled_channels(channels: list[str]) -> list[str]:
+    """保存全局启用的推送渠道 (同时维护历史键, 兼容旧前端)。"""
+    return set_webhook_default_channels(channels)
 
 
 def get_screener_auto_run() -> bool:

@@ -159,6 +159,21 @@ def set_email_smtp_password(password: str) -> str:
     return value
 
 
+def get_feishu_app_secret() -> str:
+    """飞书自建应用的 App Secret (应用机器人推送用)。"""
+    return str(load().get("feishu_app_secret") or "")
+
+
+def set_feishu_app_secret(secret: str) -> str:
+    """Persist or clear the Feishu app secret."""
+    value = (secret or "").strip()
+    if value:
+        save({"feishu_app_secret": value})
+    else:
+        clear("feishu_app_secret")
+    return value
+
+
 def get_env_backed_secret(field: str, env_name: str) -> str:
     """取环境变量后备的密钥(插件 API Key 等):secrets.json 优先,否则环境变量。
 

@@ -1,0 +1,6 @@
+{
+  "id": "uf_chain_3",
+  "label": "uf_chain_3",
+  "kind": "custom",
+  "formula": "uf_chain_4 * 2"
+}

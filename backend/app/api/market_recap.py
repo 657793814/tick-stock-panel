@@ -32,6 +32,7 @@ class AnalyzeRequest(BaseModel):
     """AI 大盘复盘请求。"""
     as_of: str | None = None  # 可选:复盘日期(YYYY-MM-DD),缺省取最新有数据日
     focus: str = ""           # 可选:用户追加的复盘关注点
+    market: str = "cn"        # cn | hk | us（默认 cn）
 
 
 @router.get("/dragon-tiger")
@@ -87,11 +88,30 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
       {"type":"error","message":"..."}
       {"type":"done"}
     """
+    import json
     from datetime import date as date_cls
 
     repo = request.app.state.repo
     quote_service = getattr(request.app.state, "quote_service", None)
     depth_service = getattr(request.app.state, "depth_service", None)
+
+    # 港美股复盘门控（方案 §5.7）：不输出 A 股涨停/连板叙事。返回明确的
+    # NDJSON gate，让前端提示用户该市场暂不支持 AI 复盘，而不是给错数据。
+    if req.market in ("hk", "us"):
+        async def market_gate():
+            yield json.dumps({
+                "type": "error",
+                "code": "market_not_supported",
+                "message": f"{req.market.upper()} 市场暂不支持 AI 大盘复盘（A 股涨停/连板口径不适用）",
+                "market": req.market,
+            }, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "done", "market": req.market}, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(
+            market_gate(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     as_of = None
     if req.as_of:

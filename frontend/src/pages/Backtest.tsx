@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { BookmarkCheck, FlaskConical, Info, ShieldCheck } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
+import { useMarket, marketLabel } from '@/lib/market'
 import { ResearchCandidatesDialog } from './backtest/ResearchCandidatesDialog'
 import { RobustnessValidation } from './backtest/RobustnessValidation'
 import { StrategyBacktest } from './backtest/StrategyBacktest'
@@ -28,6 +29,8 @@ export function Backtest() {
   const navigate = useNavigate()
   const requestedTab = searchParams.get('tab')
   const [candidatesOpen, setCandidatesOpen] = useState(false)
+  // 全局市场切换: 回测视图遵循全局市场（本地回测数据为现状共享，市场作用由顶部提示 + 策略市场印花税体现）
+  const { market } = useMarket()
   // 候选「载入复测」: 弹窗选定 → 关闭弹窗切到策略页 → StrategyBacktest 消费后清空
   const [pendingLoad, setPendingLoad] = useState<ResearchCandidate | null>(null)
 
@@ -68,7 +71,8 @@ export function Backtest() {
     <div className="flex min-h-full flex-col bg-base">
       <PageHeader
         title="回测"
-        subtitle={<span className="hidden md:inline">{MODES[activeTab].subtitle}</span>}
+        subtitle={MODES[activeTab].subtitle}
+        titleExtra={market !== 'cn' ? <span className="rounded-full border border-border bg-elevated px-2 py-0.5 text-[10px] text-secondary">当前市场：{marketLabel(market)}</span> : null}
         className="shrink-0 flex-wrap gap-x-4 gap-y-2 bg-base/95 px-3 lg:flex-nowrap lg:px-5"
         right={(
           <div className="flex w-full min-w-0 items-center gap-1.5 sm:gap-2 lg:w-auto">

@@ -1012,19 +1012,90 @@ def compute_limit_signals(
     return df
 
 
+def _compute_market_turnover(
+    df: pl.DataFrame,
+    instruments: pl.DataFrame | None,
+    market: str,
+) -> pl.DataFrame:
+    """港美股换手率(%) = volume(股) / float_shares(股) * 100。
+
+    与 A 股口径的差异只在成交量单位: A 股 volume 以「手」(100 股) 计, 公式是
+    volume * 10000 / float_shares; 港美股 volume 已是股, 不能再乘 100。
+    此前港美股完全没有该列 (计算逻辑藏在 compute_limit_signals 里而被整体跳过)。
+
+    流通股本取维表当前值 (不做历史股本回溯 —— A 股 share history 表不含港美股),
+    因此历史日期的换手率是「按当前股本折算」的近似值。
+    """
+    if df.is_empty() or "volume" not in df.columns or "turnover_rate" in df.columns:
+        return df
+    if instruments is None or instruments.is_empty() or "float_shares" not in instruments.columns:
+        return df
+    shares = (
+        instruments.select("symbol", pl.col("float_shares").cast(pl.Float64, strict=False))
+        .unique(subset=["symbol"])
+        .rename({"float_shares": "_mkt_float_shares"})
+    )
+    out = df.join(shares, on="symbol", how="left")
+    shares_per_unit = 100.0 if market == "cn" else 1.0
+    return out.with_columns(
+        pl.when(pl.col("_mkt_float_shares") > 0)
+        .then(pl.col("volume") * shares_per_unit / pl.col("_mkt_float_shares") * 100.0)
+        .otherwise(None)
+        .alias("turnover_rate")
+    ).drop("_mkt_float_shares")
+
+
 def compute_all(
     df: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
+    market: str = "cn",
 ) -> pl.DataFrame:
     """从 OHLCV 计算全套指标 + 信号。一站式调用。
 
     输入: symbol, date, open, high, low, close, volume, amount, raw_close
+
+    market: 逻辑市场 (cn/hk/us, 默认 cn)。
+      - cn: 保持现有完整链路, 计算涨跌停/连板信号。
+      - hk/us: 无涨跌停语义, 跳过 compute_limit_signals, 补齐
+        signal_limit_* = False、consecutive_limit_* = 0, 保证下游列契约
+        (列存在但恒为假/0) —— 不产生无意义涨跌停/连板信号。
     """
     df = compute_indicators(df)
     df = compute_signals(df)
-    if instruments is not None and not instruments.is_empty():
-        df = compute_limit_signals(df, instruments, historical_shares=historical_shares)
+    if market == "cn":
+        # A 股行为保持不变: 仅在有维表时计算涨跌停/连板信号。
+        if instruments is not None and not instruments.is_empty():
+            df = compute_limit_signals(df, instruments, historical_shares=historical_shares)
+    else:
+        # HK/US: 跳过涨跌停判定价与连板, 无条件补齐信号/连板列 (默认 false/0)。
+        # 与 instruments 是否存在无关, 保证下游 (regime/梯队等) 读取列契约时
+        # 列恒存在且为假/0, 不产生错误信号。cn 链路不受影响。
+        #
+        # 连板数显式写成 Int64 (与 app.parquet.ENRICHED_STORAGE_SCHEMA 声明的宽整型
+        # 一致)。裸 pl.lit(0) 是 Int32: 与 A 股的 UInt32 同处一张 kline_daily_enriched
+        # 时, 按 schema 扫描会报 "incoming Int32 != target UInt32" 并整体失败,
+        # 港股日K/均线全部读不出来。
+        df = df.with_columns(
+            pl.lit(False).alias("signal_limit_up"),
+            pl.lit(False).alias("signal_limit_down"),
+            pl.lit(False).alias("signal_limit_down_recovery"),
+            pl.lit(False).alias("signal_broken_limit_up"),
+            pl.lit(0, dtype=pl.Int64).alias("consecutive_limit_ups"),
+            pl.lit(0, dtype=pl.Int64).alias("consecutive_limit_downs"),
+        )
+        # A 股的 turnover_rate 是 compute_limit_signals 的副产物（那里读维表
+        # float_shares 并做「手→股」换算）。港美股跳过该函数后换手率恒为 null，
+        # 会让按换手率筛股的策略在港美股筛不出任何标的，故单独补一次。
+        df = _compute_market_turnover(df, instruments, market)
+
+    # 连板/连跌数统一到存储 schema 的宽整型 (Int64): cn 由 cum_sum 得到 UInt32,
+    # 港美股上面写的是 Int64。不统一的话同一张表并存 UInt32/Int32/Int64,
+    # 按 schema 扫描会整次失败 (港美股早期的 Int32 就曾让港股日K读不出来)。
+    count_cols = [c for c in ("consecutive_limit_ups", "consecutive_limit_downs")
+                  if c in df.columns]
+    if count_cols:
+        df = df.with_columns([pl.col(c).cast(pl.Int64, strict=False) for c in count_cols])
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
@@ -1066,12 +1137,15 @@ def compute_enriched(
     factors: pl.DataFrame | None = None,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
+    market: str = "cn",
 ) -> pl.DataFrame:
     """对原始日 K 应用前复权 + 全量计算指标 + 信号, 产出完整 enriched (含全部指标列)。
 
     输入应包含至少: symbol, date, open, high, low, close, volume (可选 amount)。
     如果提供了 factors, 先应用前复权再算指标。
     如果提供了 instruments, 计算涨跌停信号和换手率。
+
+    market: 逻辑市场, 默认 cn。hk/us 时跳过涨跌停/连板信号 (见 compute_all)。
     """
     if raw.is_empty():
         return raw
@@ -1101,6 +1175,7 @@ def compute_enriched(
         df,
         instruments=instruments,
         historical_shares=historical_shares,
+        market=market,
     )
 
     return df
@@ -1177,7 +1252,7 @@ def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
                     wanted.append(sym)
                     bench_of[sym] = bench_key
         lf = scan_daily_parquet(
-            index_glob, cast_options=pl.ScanCastOptions(integer_cast="allow-float")
+            index_glob, cast_options=pl.ScanCastOptions(integer_cast="upcast")
         )
         df_idx = (
             lf.filter(pl.col("symbol").is_in(wanted))
@@ -1497,6 +1572,7 @@ def _compute_storage_batches(
     factors: pl.DataFrame,
     instruments: pl.DataFrame,
     historical_shares: pl.DataFrame,
+    market: str = "cn",
 ) -> pl.DataFrame:
     """保留完整标的历史输入, 单批计算宽表后仅累积落盘窄表。"""
     from app.services import preferences
@@ -1516,6 +1592,7 @@ def _compute_storage_batches(
                          if not instruments.is_empty() else instruments),
             historical_shares=(historical_shares.filter(pl.col("symbol").is_in(batch))
                                if not historical_shares.is_empty() else historical_shares),
+            market=market,
         )
         # 下一批开始前释放宽表; 分区发布仍在所有计算批次成功之后。
         if not part.is_empty():
@@ -1542,7 +1619,7 @@ def recompute_daily_symbols(
     files = repo.daily_repair_files(asset_type)
     if not files:
         raise ValueError("没有可用于重算的原始日K")
-    raw_scan = scan_daily_parquet(files, cast_options=pl.ScanCastOptions(integer_cast="allow-float"))
+    raw_scan = scan_daily_parquet(files, cast_options=pl.ScanCastOptions(integer_cast="upcast"))
     selected = sorted(set(symbols)) if symbols is not None else raw_scan.select("symbol").unique().collect()["symbol"].to_list()
     if not selected:
         raise ValueError("没有可用于重算的股票")
@@ -1595,7 +1672,8 @@ def recompute_daily_symbols(
 def run_pipeline(data_dir: Path | None = None,
                  symbols: list[str] | None = None,
                  new_dates_only: bool = False,
-                 on_batch_done: Callable[[int, int], None] | None = None) -> int:
+                 on_batch_done: Callable[[int, int], None] | None = None,
+                 market: str = "cn") -> int:
     """运行盘后管道; 异常中断时释放尚未写入的发布认领。
 
     真正实现见 _run_pipeline_impl。包装层单独存在, 是为了保证任何异常都
@@ -1603,6 +1681,9 @@ def run_pipeline(data_dir: Path | None = None,
     恢复 ready; 已写入部分分区时保持 fail-closed, 由心跳超时后的读取方接管。
     没有这层收尾时, 一次异常就会把 publishing 标记永久留在磁盘上, 之后所有
     读写持续失败, 且停止实时行情 (运行期唯一频繁的写入方) 也无法自愈。
+
+    market: 逻辑市场 (默认 cn), 透传给 compute_all 做市场隔离 (hk/us 跳过
+    涨跌停/连板信号)。所有调用方默认 cn, 旧行为不变。
     """
     d = Path(data_dir or settings.data_dir)
     publication = EnrichedPublication(
@@ -1614,6 +1695,7 @@ def run_pipeline(data_dir: Path | None = None,
             symbols=symbols,
             new_dates_only=new_dates_only,
             on_batch_done=on_batch_done,
+            market=market,
             publication=publication,
         )
     except BaseException:
@@ -1626,7 +1708,8 @@ def _run_pipeline_impl(data_dir: Path | None = None,
                        new_dates_only: bool = False,
                        on_batch_done: Callable[[int, int], None] | None = None,
                        *,
-                       publication: EnrichedPublication) -> int:
+                       publication: EnrichedPublication,
+                       market: str = "cn") -> int:
     """运行盘后管道:读 kline_daily + adj_factor → 前复权 + 计算存储列 → 写 enriched。
 
     enriched 表仅存储 14 列基础行情窄表 (OHLCV + raw_close/high/low + turnover_rate + 连板数)。
@@ -1656,14 +1739,20 @@ def _run_pipeline_impl(data_dir: Path | None = None,
     daily_dir = d / "kline_daily"
     enriched_base = d / "kline_daily_enriched"
     factor_path = d / "adj_factor" / "all.parquet"
-    inst_glob = str(d / "instruments" / "**" / "*.parquet")
+    # 维表跟随市场: 港美股维表单独存放 (instruments_index_{market}),
+    # 用 A 股维表算港美股会让 turnover_rate/市值 全空, 反之永不发生 (A 股走默认路径)。
+    market_inst_path = d / f"instruments_index_{market}" / "instruments.parquet"
+    if market != "cn" and market_inst_path.exists():
+        inst_glob = str(market_inst_path)
+    else:
+        inst_glob = str(d / "instruments" / "**" / "*.parquet")
 
     if not daily_dir.exists() or not any(daily_dir.rglob("*.parquet")):
         logger.info("无日K数据, 跳过管道")
         return 0
 
     daily_glob = (daily_dir / "**" / "*.parquet").as_posix()
-    _cast = pl.ScanCastOptions(integer_cast="allow-float")
+    _cast = pl.ScanCastOptions(integer_cast="upcast")
     written = 0
 
     # 加载 instruments (涨跌停+换手率需要)
@@ -1722,6 +1811,7 @@ def _run_pipeline_impl(data_dir: Path | None = None,
                 factors=factors,
                 instruments=instruments,
                 historical_shares=historical_shares,
+                market=market,
             )
 
             # 只保留新日期的行
@@ -1765,6 +1855,7 @@ def _run_pipeline_impl(data_dir: Path | None = None,
                     factors=factors_sym,
                     instruments=inst_sym,
                     historical_shares=shares_sym,
+                    market=market,
                 )
                 for date_df in enriched_sym.partition_by("date"):
                     dt = date_df["date"][0]
@@ -1874,6 +1965,7 @@ def _run_pipeline_impl(data_dir: Path | None = None,
                 factors=batch_factors,
                 instruments=batch_inst,
                 historical_shares=batch_shares,
+                market=market,
             )
 
             if not enriched.is_empty():
@@ -1891,7 +1983,9 @@ def _run_pipeline_impl(data_dir: Path | None = None,
                             date_df_storage = pl.concat([existing, date_df_storage], how="diagonal_relaxed")
                         date_df_storage = date_df_storage.sort(["symbol"])
                         publication.write_parquet(date_df_storage, out)
-                        written += date_df_storage.height
+                        # 只计本次产出的行: 合写后的分区还含其它市场/批次的存量行,
+                        # 用合并结果计数会把「同步 20 只港股」报成 130 万行。
+                        written += date_df.height
                 else:
                     # 全量模式: 写单批暂存文件 (按 date,symbol 排序 →
                     # 合并期 parquet 行组统计可按日期裁剪), 随即释放本批内存
@@ -2005,7 +2099,7 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
     from datetime import date, timedelta
     cutoff = date.today() - timedelta(days=days + 30)  # 多读 30 天余量
 
-    cast_options = pl.ScanCastOptions(integer_cast="allow-float")
+    cast_options = pl.ScanCastOptions(integer_cast="upcast")
     try:
         lf = (
             scan_enriched_parquet(

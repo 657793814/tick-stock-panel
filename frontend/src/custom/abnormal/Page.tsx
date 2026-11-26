@@ -17,6 +17,8 @@ import { fmtPrice, fmtPct, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/components/stock-table/primitives'
 import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { MarketNotSupportedHint } from '@/components/MarketNotSupported'
+import { useMarket } from '@/lib/market'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
 
 /**
@@ -74,6 +76,25 @@ const SIGNAL_META: Record<IntradaySignalKey, { label: string; cls: string }> = {
 }
 
 export function AbnormalMoves() {
+  // 异动全部口径建立在 A 股涨跌停/连板/交易所异动规则上, 港美股明确不支持
+  // (后端 /api/abnormal/* 对非 cn 返回 409); 这里提前拦一层, 不发出注定失败的请求。
+  // 门禁单独放在包装组件里, 避免在主体组件内「先 return 再调 hook」。
+  const { market } = useMarket()
+  if (market !== 'cn') {
+    return (
+      <div className="min-h-full bg-base">
+        <PageHeader title="异动监控" subtitle="竞价 · 盘中 · 偏移 · 全时段异动中心" />
+        <MarketNotSupportedHint
+          pageName="异动监控"
+          reason="异动规则依赖 A 股涨跌停/连板与交易所异动阈值"
+        />
+      </div>
+    )
+  }
+  return <AbnormalMovesCn />
+}
+
+function AbnormalMovesCn() {
   const [tab, setTab] = useState<AbnormalTab>('intraday')
   // navList: 弹窗切股的候选列表, 打开详情时由来源 tab 一并给出
   const [preview, setPreview] = useState<{ symbol: string; name: string; navList: NavItem[] } | null>(null)

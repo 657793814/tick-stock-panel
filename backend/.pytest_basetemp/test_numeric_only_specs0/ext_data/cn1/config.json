@@ -1,0 +1,18 @@
+{
+  "id": "cn1",
+  "label": "题材标签",
+  "mode": "snapshot",
+  "fields": [
+    {
+      "name": "涨停数",
+      "dtype": "int",
+      "label": "涨停数"
+    }
+  ],
+  "description": "",
+  "symbol_map": {},
+  "code_map": {},
+  "market_level": false,
+  "created_at": "2026-11-23T00:47:52.859385",
+  "updated_at": "2026-11-23T00:47:52.859396"
+}

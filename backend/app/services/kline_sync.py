@@ -36,7 +36,8 @@ from app.data_providers.minute_normalizer import (
 from app.data_providers.minute_stream import iter_minute_frames
 from app.indicators.pipeline import filter_halt_days
 from app.market_time import CN_TZ, cn_now, cn_today
-from app.parquet import scan_daily_parquet
+from app.markets import MARKET_CN, market_of
+from app.parquet import DAILY_STORAGE_SCHEMA, align_storage_dtypes, scan_daily_parquet
 from app.services import minute_adjust, preferences
 from app.services.shared_work import SharedWork, WorkBusyError
 from app.tickflow.capabilities import Cap, CapabilitySet
@@ -129,6 +130,36 @@ def _normalize_daily(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     # 过滤停牌日 (open/high 为 0; close 可能被填充为前收盘价, 不能用全零判断)
     df = filter_halt_days(df)
 
+    # 源端退化 K 线修正: 极冷门标的当日只成交一笔时, 部分源会返回
+    # open=low=0 而 high=close=成交价 (实测 TickFlow 美股 BFJA.US/RCLY.US
+    # 2026-11-24: open=0, low=0, high=close=16.495, volume=10)。零价行会让
+    # 真实波幅/ATR 算出无意义值, 也会被自检判为「非停牌日存在零价」, 进而
+    # 锁住 daily_health 阻断盘后管道与回测; 而重新取数返回的仍是同一批零价,
+    # 于是整日修补永远失败。这里用当日已知收盘价回填缺失的开/低价(等价于
+    # 单笔平盘 K 线); 收盘价本身不可用时该行没有任何价格信息, 直接丢弃。
+    if not df.is_empty() and "close" in df.columns:
+        price_cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
+        missing_close = pl.col("close").is_null() | (pl.col("close") <= 0)
+        bad = pl.any_horizontal([pl.col(c).is_null() | (pl.col(c) <= 0) for c in price_cols])
+        repairable = df.filter(bad & ~missing_close)
+        if repairable.height:
+            logger.warning(
+                "日K退化行回填: %d 行缺开/低价, 用当日收盘价补齐 (样例 %s)",
+                repairable.height, repairable.select(["symbol", *price_cols]).head(3).to_dicts(),
+            )
+            df = df.with_columns([
+                pl.when(pl.col(c).is_null() | (pl.col(c) <= 0)).then(pl.col("close"))
+                .otherwise(pl.col(c)).alias(c)
+                for c in price_cols if c != "close"
+            ])
+        no_price = df.filter(missing_close)
+        if no_price.height:
+            logger.warning(
+                "丢弃 %d 行无有效收盘价的日K (样例 %s)",
+                no_price.height, no_price.select(["symbol", *price_cols]).head(3).to_dicts(),
+            )
+            df = df.filter(~missing_close)
+
     # 只保留 canonical 列
     keep = [c for c in CANONICAL_DAILY_COLS if c in df.columns]
     return df.select(keep)
@@ -208,11 +239,16 @@ def sync_daily_batch(symbols: list[str],
                      start_time: datetime | None = None,
                      end_time: datetime | None = None,
                      on_chunk_done: Callable[[int, int], None] | None = None,
-                     failed_out: list[str] | None = None) -> pl.DataFrame:
+                     failed_out: list[str] | None = None,
+                     adjust: str = "none") -> pl.DataFrame:
     """批量拉取多股日 K。
 
     优先使用 start_time / end_time 区间 + count=10000,确保覆盖完整时间段。
     仅传 count 时按条数回溯。
+
+    adjust: 前复权方式, 默认 "none"(原始价, A 股既有行为)。港美股无独立除权因子表,
+            复刻港美股数据同步时传 "forward"(前复权), 见 services.index_sync_market 之外的
+            港美股同步路径; 此改动为纯增量, 默认不改变 A 股行为。
 
     failed_out: 可选出参。拉取失败的分块标的会追加进该 list, 供上层判定「部分失败」
                 而非静默当成功(某分块断网 → 这些标的本轮未更新, 保持旧数据)。
@@ -227,7 +263,7 @@ def sync_daily_batch(symbols: list[str],
         try:
             if start_time and end_time:
                 raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
-                    chunk, period="1d", adjust="none",
+                    chunk, period="1d", adjust=adjust,
                     start_time=_datetime_to_ms(start_time),
                     end_time=_datetime_to_ms(end_time),
                     count=10000,
@@ -235,7 +271,7 @@ def sync_daily_batch(symbols: list[str],
                 ))
             else:
                 raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
-                    chunk, period="1d", count=count or 250, adjust="none",
+                    chunk, period="1d", count=count or 250, adjust=adjust,
                     as_dataframe=False, show_progress=False))
         except SDKCallTimeoutError as e:
             logger.warning("batch fetch timed out for %d symbols (chunk %d/%d): %s",
@@ -304,6 +340,9 @@ def iter_daily_frames(
     provider_name = preferences.get_daily_data_provider()
     logger.info("日K修补取数: provider=%s asset=%s symbols=%d start=%s end=%s",
                 provider_name, asset_type, len(symbols), start_time.isoformat(), end_time.isoformat())
+    # 内置日K插件(fuyao/tdxquant)只覆盖 A 股: 港美股标的即便源本身可用也拿不到数据。
+    # 这类标的不能按「源缺数据」直接放弃, 否则永远无法修补 —— 交由 TickFlow 补取。
+    uncovered = [s for s in symbols if market_of(s) != MARKET_CN] if asset_type == "stock" else []
     if provider_name != "tickflow" and custom.provider_has_dataset(provider_name, "daily"):
         found = False
         for frame in iter_custom_daily_frames(
@@ -314,9 +353,16 @@ def iter_daily_frames(
                 found = True
                 yield frame
         # 非股票源沿用指数/ETF 原有的「明确不支持时回退」契约。
-        if found or asset_type == "stock":
+        if asset_type != "stock":
+            if found:
+                return
+            logger.warning("日K源 %s 未返回 %s 数据, 修补回退 TickFlow", provider_name, asset_type)
+        elif not uncovered:
             return
-        logger.warning("日K源 %s 未返回 %s 数据, 修补回退 TickFlow", provider_name, asset_type)
+        else:
+            logger.warning("日K源 %s 只覆盖 A 股, %d 只港美股标的改由 TickFlow 补取",
+                           provider_name, len(uncovered))
+            symbols = uncovered
     elif provider_name != "tickflow":
         logger.warning("数据源 %s 未提供 daily 能力, 修补回退 TickFlow", provider_name)
     if not capset.has(Cap.KLINE_DAILY_BATCH):
@@ -466,6 +512,9 @@ def _persist_daily_chunks(chunks, repo: KlineRepository) -> int:
             if df.is_empty():
                 continue
             for date_df in df.partition_by("date"):
+                # 直提文件同样按存储契约归一: 新日期没有存量分区时直接 promote,
+                # 若不归一, 整型 volume 会原样落盘, 次日的分区合并再次 SchemaError。
+                date_df = align_storage_dtypes(date_df, DAILY_STORAGE_SCHEMA)
                 dt = date_df["date"][0]
                 ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
                 out = root / f"date={ds}" / f"part-{index}.parquet"

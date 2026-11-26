@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, createContext, useContext } from 'react'
+import { Link } from 'react-router-dom'
 import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
 import {
   Activity,
@@ -74,8 +75,8 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   // 修复轮的 intraday.batch 与其同档, 见后端 minute_refresh 服务
   const hasFullMinuteCap = !!caps?.capabilities?.['intraday.universe']
   const rs = refreshStatus.data
-  // 新建监控规则时默认勾选的推送渠道 (全局默认值数组, 单条规则可独立修改)
-  const webhookDefaultChannels = prefs?.webhook_default_channels ?? []
+  // 设置页勾选的「启用推送渠道」(与 IM 管理共用同一份偏好)
+  const enabledChannels = prefs?.webhook_enabled_channels ?? prefs?.webhook_default_channels ?? []
   const isRunning = quoteStatus?.running ?? false
   const isTrading = quoteStatus?.is_trading_hours ?? false
   // 管道/数据修正运行期间实时行情被临时暂停 — 此时禁止开启
@@ -86,6 +87,9 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const [intervalDraft, setIntervalDraft] = useState(interval)
   const feishuWebhookUrl = prefs?.feishu_webhook_url ?? ''
   const feishuWebhookSecret = prefs?.feishu_webhook_secret ?? ''
+  const feishuAppConfigured = !!(
+    prefs?.feishu_app_id && prefs?.feishu_app_secret_set && prefs?.feishu_app_chat_id
+  )
   const [feishuDraft, setFeishuDraft] = useState(feishuWebhookUrl)
   const [feishuSecretDraft, setFeishuSecretDraft] = useState(feishuWebhookSecret)
   const [feishuError, setFeishuError] = useState('')
@@ -115,8 +119,12 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const wecomBotId = prefs?.wecom_bot_id ?? ''
   const wecomBotSecret = prefs?.wecom_bot_secret ?? ''
   const wecomBotEnabled = prefs?.wecom_bot_enabled ?? false
+  const wecomBotChatId = prefs?.wecom_bot_chat_id ?? ''
+  const wecomBotChats = prefs?.wecom_bot_chats ?? []
+  const wecomBotConfigured = !!(wecomBotId && wecomBotSecret && wecomBotChatId)
   const [botIdDraft, setBotIdDraft] = useState(wecomBotId)
   const [botSecretDraft, setBotSecretDraft] = useState(wecomBotSecret)
+  const [botChatDraft, setBotChatDraft] = useState(wecomBotChatId)
   const [botError, setBotError] = useState('')
   const [botStatus, setBotStatus] = useState<{connected: boolean; last_error: string} | null>(null)
   // 飞书渠道配置区展开态 (推送通知卡片内)
@@ -146,6 +154,9 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     setBotIdDraft(wecomBotId)
     setBotSecretDraft(wecomBotSecret)
   }, [wecomBotId, wecomBotSecret])
+  useEffect(() => {
+    setBotChatDraft(wecomBotChatId)
+  }, [wecomBotChatId])
 
   const save = useCallback(async (cfg: Record<string, unknown>) => {
     try {
@@ -167,11 +178,11 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     qc.invalidateQueries({ queryKey: QK.preferences })
   }, [qc])
 
-  // 勾选/取消勾选某个默认推送渠道。
-  const toggleDefaultChannel = useCallback(async (ch: string, enabled: boolean) => {
-    const cur = prefs?.webhook_default_channels ?? []
+  // 勾选=打开该推送渠道, 取消=全局关闭 (与 IM 管理共用同一份偏好)
+  const toggleEnabledChannel = useCallback(async (ch: string, enabled: boolean) => {
+    const cur = prefs?.webhook_enabled_channels ?? prefs?.webhook_default_channels ?? []
     const next = enabled ? [...cur, ch] : cur.filter(c => c !== ch)
-    await api.updateWebhookDefaultChannels(next)
+    await api.updateWebhookEnabledChannels(next)
     qc.invalidateQueries({ queryKey: QK.preferences })
   }, [qc, prefs])
 
@@ -220,6 +231,9 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   })
   const testWecom = useMutation({
     mutationFn: () => api.sendTestWebhook('wecom'),
+  })
+  const testWecomBot = useMutation({
+    mutationFn: () => api.sendTestWebhook('wecom_bot'),
   })
 
   const saveCustomWebhook = useMutation({
@@ -303,6 +317,19 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
       })
       qc.invalidateQueries({ queryKey: QK.preferences })
     },
+  })
+  const saveBotChat = useMutation({
+    mutationFn: () => api.updateWecomBotChat(botChatDraft.trim()),
+    onSuccess: () => {
+      setBotError('')
+      toast('智能机器人目标会话已保存', 'success')
+      qc.invalidateQueries({ queryKey: QK.preferences })
+    },
+    onError: (err: any) => setBotError(String(err?.message ?? '保存失败')),
+  })
+  const refreshBotChats = useMutation({
+    mutationFn: () => api.listWecomBotChats(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
   })
 
   const runFix = useMutation({
@@ -557,16 +584,16 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
           )}
         </Card>
 
-        {/* 推送通知 — 监控告警的外部推送渠道 (全局配置)。
-            飞书 / 企业微信 / 第三方 Webhook / 邮件。
-            每个渠道合并成一行: 勾选=新建规则默认推送, 点行展开地址配置。 */}
+        {/* 推送通知 — 与「设置 → IM 管理」共用同一份配置, 只是入口不同。
+            勾选=启用该推送渠道; 点行展开配置。 */}
         <Card icon={Webhook} title="推送通知" anchor="webhooks">
           <p className="text-xs text-secondary mb-3">
-            监控规则命中后,可把告警推送到外部。勾选渠道作为<b className="text-foreground/80">新建规则的默认推送</b>,
-            单条规则仍可在编辑页独立修改。
+            监控规则命中后,可把告警推送到外部。勾选=<b className="text-foreground/80">打开该推送渠道</b>,
+            取消勾选则全局关闭; 此处与「设置 → IM 管理」共用同一份配置。
+            <Link to="/settings?tab=IM-management" className="ml-1 text-accent hover:text-accent/80">前往 IM 管理 →</Link>
           </p>
 
-          {/* 渠道列表 — 每行一个渠道, 勾选默认 + 点行展开地址配置 */}
+          {/* 渠道列表 — 每行一个渠道, 勾选启用 + 点行展开配置 */}
           <div className="space-y-2">
             {/* 飞书 (可用): 勾选默认 + 展开地址配置 */}
             <div className="rounded-btn border border-border/60 bg-base/40 overflow-hidden">
@@ -576,16 +603,16 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               >
                 <input
                   type="checkbox"
-                  checked={webhookDefaultChannels.includes('feishu')}
-                  onChange={e => { e.stopPropagation(); toggleDefaultChannel('feishu', e.target.checked) }}
+                  checked={enabledChannels.includes('feishu')}
+                  onChange={e => { e.stopPropagation(); toggleEnabledChannel('feishu', e.target.checked) }}
                   onClick={e => e.stopPropagation()}
-                  title="作为新建规则的默认推送渠道"
+                  title="启用该推送渠道"
                   className="h-3 w-3 accent-accent cursor-pointer"
                 />
                 <span className="text-[11px] font-medium text-foreground">飞书</span>
                 <span className="text-[9px] text-muted">群推送 Webhook</span>
-                {webhookDefaultChannels.includes('feishu') && (
-                  <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">默认</span>
+                {enabledChannels.includes('feishu') && (
+                  <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">已启用</span>
                 )}
                 <span className={`ml-auto text-[9px] ${feishuWebhookUrl ? 'text-emerald-500' : 'text-warning'}`}>
                   {feishuWebhookUrl ? '已配置' : '未配置'}
@@ -656,7 +683,27 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               )}
             </div>
 
-            {/* 企业微信群推送 Webhook (可用): 与飞书并列, 勾选默认 + 展开地址配置 */}
+            {/* 飞书智能机器人(应用): 凭证在 IM 管理统一维护, 这里只做启用开关 */}
+            <div className="flex items-center gap-2 rounded-btn border border-border/60 bg-base/40 px-2.5 py-2">
+              <input
+                type="checkbox"
+                checked={enabledChannels.includes('feishu_app')}
+                onChange={e => toggleEnabledChannel('feishu_app', e.target.checked)}
+                title="启用该推送渠道"
+                className="h-3 w-3 accent-accent cursor-pointer"
+              />
+              <span className="text-[11px] font-medium text-foreground">飞书</span>
+              <span className="text-[9px] text-muted">智能机器人(应用)</span>
+              {enabledChannels.includes('feishu_app') && (
+                <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">已启用</span>
+              )}
+              <span className={`ml-auto text-[9px] ${feishuAppConfigured ? 'text-emerald-500' : 'text-warning'}`}>
+                {feishuAppConfigured ? '已配置' : '未配置'}
+              </span>
+              <Link to="/settings?tab=IM-management" className="text-[9px] text-accent hover:text-accent/80">配置 →</Link>
+            </div>
+
+            {/* 企业微信群推送 Webhook (可用): 与飞书并列, 勾选启用 + 展开地址配置 */}
             <div className="rounded-btn border border-border/60 bg-base/40 overflow-hidden">
               <div
                 onClick={() => setWecomOpen(o => !o)}
@@ -664,16 +711,16 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               >
                 <input
                   type="checkbox"
-                  checked={webhookDefaultChannels.includes('wecom')}
-                  onChange={e => { e.stopPropagation(); toggleDefaultChannel('wecom', e.target.checked) }}
+                  checked={enabledChannels.includes('wecom')}
+                  onChange={e => { e.stopPropagation(); toggleEnabledChannel('wecom', e.target.checked) }}
                   onClick={e => e.stopPropagation()}
-                  title="作为新建规则的默认推送渠道"
+                  title="启用该推送渠道"
                   className="h-3 w-3 accent-accent cursor-pointer"
                 />
                 <span className="text-[11px] font-medium text-foreground">企业微信</span>
                 <span className="text-[9px] text-muted">群推送 Webhook</span>
-                {webhookDefaultChannels.includes('wecom') && (
-                  <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">默认</span>
+                {enabledChannels.includes('wecom') && (
+                  <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">已启用</span>
                 )}
                 <span className={`ml-auto text-[9px] ${wecomWebhookUrl ? 'text-emerald-500' : 'text-warning'}`}>
                   {wecomWebhookUrl ? '已配置' : '未配置'}
@@ -740,16 +787,16 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               >
                 <input
                   type="checkbox"
-                  checked={webhookDefaultChannels.includes('custom')}
-                  onChange={e => { e.stopPropagation(); toggleDefaultChannel('custom', e.target.checked) }}
+                  checked={enabledChannels.includes('custom')}
+                  onChange={e => { e.stopPropagation(); toggleEnabledChannel('custom', e.target.checked) }}
                   onClick={e => e.stopPropagation()}
-                  title="作为新建规则的默认推送渠道"
+                  title="启用该推送渠道"
                   className="h-3 w-3 accent-accent cursor-pointer"
                 />
                 <span className="text-[11px] font-medium text-foreground">第三方系统</span>
                 <span className="text-[9px] text-muted">JSON Webhook</span>
-                {webhookDefaultChannels.includes('custom') && (
-                  <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">默认</span>
+                {enabledChannels.includes('custom') && (
+                  <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">已启用</span>
                 )}
                 <span className={`ml-auto text-[9px] ${customWebhookUrl ? 'text-emerald-500' : 'text-warning'}`}>
                   {customWebhookUrl ? '已配置' : '未配置'}
@@ -809,16 +856,16 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               >
                 <input
                   type="checkbox"
-                  checked={webhookDefaultChannels.includes('email')}
-                  onChange={e => { e.stopPropagation(); toggleDefaultChannel('email', e.target.checked) }}
+                  checked={enabledChannels.includes('email')}
+                  onChange={e => { e.stopPropagation(); toggleEnabledChannel('email', e.target.checked) }}
                   onClick={e => e.stopPropagation()}
-                  title="作为新建规则的默认推送渠道"
+                  title="启用该推送渠道"
                   className="h-3 w-3 accent-accent cursor-pointer"
                 />
                 <span className="text-[11px] font-medium text-foreground">邮件</span>
                 <span className="text-[9px] text-muted">SMTP</span>
-                {webhookDefaultChannels.includes('email') && (
-                  <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">默认</span>
+                {enabledChannels.includes('email') && (
+                  <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">已启用</span>
                 )}
                 <span className={`ml-auto text-[9px] ${emailConfigured ? 'text-emerald-500' : 'text-warning'}`}>
                   {emailConfigured ? '已配置' : '未配置'}
@@ -884,17 +931,19 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               >
                 <input
                   type="checkbox"
-                  checked={wecomBotEnabled}
-                  onChange={e => { e.stopPropagation(); toggleBotConnection.mutate(e.target.checked) }}
+                  checked={enabledChannels.includes('wecom_bot')}
+                  onChange={e => { e.stopPropagation(); toggleEnabledChannel('wecom_bot', e.target.checked) }}
                   onClick={e => e.stopPropagation()}
-                  disabled={!wecomBotId || toggleBotConnection.isPending}
-                  title="开启后建立长连接保活, 关闭则断开"
-                  className="h-3 w-3 accent-accent cursor-pointer disabled:opacity-40"
+                  title="启用该推送渠道"
+                  className="h-3 w-3 accent-accent cursor-pointer"
                 />
                 <span className="text-[11px] font-medium text-foreground">企业微信</span>
                 <span className="text-[9px] text-muted">智能机器人</span>
-                <span className={`ml-auto text-[9px] ${wecomBotId ? (botStatus?.connected ? 'text-emerald-500' : 'text-warning') : 'text-muted'}`}>
-                  {wecomBotId ? (botStatus?.connected ? '已连接' : (wecomBotEnabled ? '连接中' : '已配置')) : '未配置'}
+                {enabledChannels.includes('wecom_bot') && (
+                  <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">已启用</span>
+                )}
+                <span className={`ml-auto text-[9px] ${wecomBotConfigured ? 'text-emerald-500' : 'text-warning'}`}>
+                  {wecomBotConfigured ? (botStatus?.connected ? '已连接' : (wecomBotEnabled ? '连接中' : '已配置')) : '未配置'}
                 </span>
                 <ChevronDown className={`h-3 w-3 text-muted transition-transform ${botOpen ? 'rotate-180' : ''}`} />
               </div>
@@ -902,8 +951,8 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               {botOpen && (
                 <div className="border-t border-border/60 bg-base/30 p-3">
                   <p className="mb-2.5 text-[10px] text-muted leading-relaxed">
-                    勾选卡片左侧开关可启用长连接保活(开启后后端持续保持与企业微信的
-                    WebSocket 连接)。保存凭证后需勾选才会连接, 取消勾选则立即断开。
+                    左侧勾选是<b className="text-foreground/80">推送渠道开关</b>; 长连接开关在下方单独控制。
+                    主动推送需先在目标群里 @机器人发一条消息, 后端才能拿到该群的会话 ID。
                   </p>
                   <label className="block space-y-1.5">
                     <span className="text-[11px] text-muted">BotID</span>
@@ -921,10 +970,44 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
                       type="password"
                       value={botSecretDraft}
                       onChange={e => setBotSecretDraft(e.target.value)}
-                      placeholder="开启长连接 API 模式后获取的密钥"
+                      placeholder={wecomBotSecret ? '已保存；留空保持不变' : '开启长连接 API 模式后获取的密钥'}
                       className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground focus:outline-none focus:border-accent/50"
                     />
                   </label>
+
+                  <label className="block mt-2 space-y-1.5">
+                    <span className="text-[11px] text-muted">目标会话 (推送到哪个群/人)</span>
+                    <div className="flex gap-2">
+                      <input
+                        value={botChatDraft}
+                        onChange={e => setBotChatDraft(e.target.value)}
+                        placeholder="在群里 @机器人后点「刷新会话」选择"
+                        className="h-9 min-w-0 flex-1 rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground focus:outline-none focus:border-accent/50"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => refreshBotChats.mutate()}
+                        disabled={refreshBotChats.isPending}
+                        className="inline-flex shrink-0 items-center rounded-btn bg-elevated px-2.5 text-[11px] text-secondary hover:text-foreground disabled:opacity-40"
+                      >
+                        {refreshBotChats.isPending ? '读取中…' : '刷新会话'}
+                      </button>
+                    </div>
+                  </label>
+                  {wecomBotChats.length > 0 && (
+                    <select
+                      value={botChatDraft}
+                      onChange={e => setBotChatDraft(e.target.value)}
+                      className="mt-2 h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground"
+                    >
+                      <option value="">选择会话…</option>
+                      {wecomBotChats.map(c => (
+                        <option key={c.chat_id} value={c.chat_id}>
+                          {c.chat_id}（{c.chat_type || '未知'}{c.last_seen ? ` · ${c.last_seen}` : ''}）
+                        </option>
+                      ))}
+                    </select>
+                  )}
 
                   {botError && (
                     <div className="mt-2 text-[11px] text-danger">{botError}</div>
@@ -934,16 +1017,33 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
                     <div className="mt-2 text-[11px] text-warning">连接异常: {botStatus.last_error}</div>
                   )}
 
-                  <div className="mt-2 flex items-center gap-2">
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
                     <button
                       onClick={submitBot}
-                      disabled={saveWecomBot.isPending || (botIdDraft.trim() === wecomBotId && botSecretDraft.trim() === wecomBotSecret)}
+                      disabled={saveWecomBot.isPending || (botIdDraft.trim() === wecomBotId && !botSecretDraft)}
                       className="px-3 py-1.5 rounded-btn bg-accent text-white text-xs font-medium disabled:opacity-50 cursor-pointer hover:bg-accent/90 transition-colors"
                     >
-                      {saveWecomBot.isPending ? '保存中…' : '保存并连接'}
+                      {saveWecomBot.isPending ? '保存中…' : '保存凭证'}
                     </button>
+                    <button
+                      onClick={() => saveBotChat.mutate()}
+                      disabled={saveBotChat.isPending || botChatDraft.trim() === wecomBotChatId}
+                      className="px-3 py-1.5 rounded-btn bg-elevated text-secondary text-xs hover:text-foreground disabled:opacity-40"
+                    >
+                      {saveBotChat.isPending ? '保存中…' : '保存目标会话'}
+                    </button>
+                    <button
+                      onClick={() => toggleBotConnection.mutate(!wecomBotEnabled)}
+                      disabled={toggleBotConnection.isPending || !wecomBotId || !wecomBotSecret}
+                      className="px-3 py-1.5 rounded-btn bg-elevated text-secondary text-xs hover:text-foreground disabled:opacity-40"
+                      title={wecomBotEnabled ? '断开长连接' : '建立长连接'}
+                    >
+                      {toggleBotConnection.isPending ? '处理中…' : (wecomBotEnabled ? '断开长连接' : '连接长连接')}
+                    </button>
+                    <TestSendButton test={testWecomBot} configured={wecomBotConfigured} />
+                    <TestResult test={testWecomBot} />
                     {wecomBotId && (
-                      <span className="text-[10px] text-emerald-500">● 已配置</span>
+                      <span className="text-[10px] text-emerald-500">● 凭证已配置</span>
                     )}
                   </div>
 

@@ -38,6 +38,25 @@ def test_daily_preparation_and_unknown_timestamp_are_never_live(context):
     assert context.describe({"symbol": "000985.SH"})["state"] == "missing"
 
 
+def test_static_daily_without_timestamp_is_historical_not_unknown(context):
+    """港美股静态日K没有 quote_ts,应显示实际数据日期而非「时间未确认」。"""
+    row = {"symbol": "00700.HK", "date": "2026-11-06", "close": 100.}
+    # A 股路径仍要求时间戳, 防止无时间戳的当日数据冒充实时。
+    assert context.describe({**row, "symbol": "000985.SH"})["state"] == "unknown"
+    hist = context.describe(row, static_daily=True)
+    assert hist["state"] == "historical"
+    assert hist["data_date"] == "2026-11-06"
+
+
+def test_static_daily_still_reports_stale_when_date_lags(context):
+    """static_daily 只改无时间戳的语义, 数据日期落后仍须报过期。"""
+    stale = context.describe(
+        {"symbol": "00700.HK", "date": "2026-11-05", "close": 100.}, static_daily=True,
+    )
+    assert stale["state"] == "stale"
+    assert stale["data_date"] == "2026-11-05"
+
+
 @pytest.mark.parametrize("now,trading", [
     (datetime(2026, 11, 7, 10, tzinfo=CN_TZ), False),
     (datetime(2026, 11, 6, 8, tzinfo=CN_TZ), True),

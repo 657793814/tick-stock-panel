@@ -16,6 +16,7 @@ from pathlib import Path
 import polars as pl
 
 from app.parquet import scan_enriched_parquet
+from app.polars_guard import guarded_collect
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
@@ -45,8 +46,14 @@ def enriched_history_days(data_dir, asset_type: str = "stock", as_of: date | Non
 
 
 # ── 进程级历史数据缓存 (避免 run_all 每次重新扫描 parquet + 计算指标) ──
-_history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
+_history_cache: dict[tuple[str, str, date, int], tuple[float, pl.DataFrame]] = {}
 _HISTORY_CACHE_TTL = 120.0  # 秒
+# 港美股单日全指标帧的进程内缓存 (cn 由 repo 内存快照承担, 不进这里)
+_market_day_cache: dict[tuple[str, str, date], tuple[float, pl.DataFrame]] = {}
+_MARKET_DAY_CACHE_TTL = 60.0
+# 港美股「最新有覆盖日期」的短缓存: 每次看板/筛选都会问, 扫 10 个分区约百毫秒。
+_market_latest_cache: dict[tuple[str, str], tuple[float, date | None]] = {}
+_MARKET_LATEST_TTL = 60.0
 
 # load_prior_consecutive 最多回看多少个已存在的日分区 (缺列时继续往前找的上限)
 _PRIOR_PARTITION_SCAN = 10
@@ -88,11 +95,33 @@ class ScreenerResult:
 
 
 class ScreenerService:
-    def __init__(self, repo: KlineRepository, asset_type: str = "stock") -> None:
+    def __init__(self, repo: KlineRepository, asset_type: str = "stock", market: str = "cn") -> None:
+        from app.markets import get_market
+
+        get_market(market)  # 非法市场 fail-closed
         self.repo = repo
         self.asset_type = asset_type
+        self.market = market
         from app.tickflow.repository import enriched_dirname
         self._enriched_dirname = enriched_dirname(asset_type)
+
+    def _market_instruments(self) -> pl.DataFrame:
+        """该市场的标的维表。
+
+        cn 沿用共享 instruments 池; 港美股读 instruments_index_{market}。
+        用 A 股维表 join 港美股会把这些行的 name/float_shares 全变成 null
+        （进而换手率、市值、快照名称全空）。
+        """
+        if self.asset_type == "stock" and self.market != "cn":
+            return self.repo.get_instruments_market(self.market)
+        return self.repo.get_instruments_asset(self.asset_type)
+
+    def _filter_market(self, df: pl.DataFrame) -> pl.DataFrame:
+        """共享存储下按逻辑市场隔离：cn 保留 .SH/.SZ/.BJ 及无后缀数字，
+        hk 仅 .HK，us 仅 .US。空表/无 symbol 列安全返回。"""
+        from app.markets import filter_symbols
+
+        return filter_symbols(df, self.market)
 
     @staticmethod
     def clear_history_cache(asset_type: str | None = None) -> None:
@@ -102,32 +131,40 @@ class ScreenerService:
         """
         if asset_type is None:
             _history_cache.clear()
+            _market_day_cache.clear()
+            _market_latest_cache.clear()
         else:
             for key in list(_history_cache):
                 if key[0] == asset_type:
                     _history_cache.pop(key, None)
+            for key in list(_market_day_cache):
+                if key[0] == asset_type:
+                    _market_day_cache.pop(key, None)
+            for key in list(_market_latest_cache):
+                if key[1] == asset_type:
+                    _market_latest_cache.pop(key, None)
 
     def _assert_integrity(self, end: date, *, enriched_only=False) -> None:
         from app.services.daily_health import assert_usable
 
         root = getattr(getattr(self.repo, "store", None), "data_dir", None)
         if root is not None:
-            assert_usable(root, self.asset_type, end=end, enriched_only=enriched_only)
+            assert_usable(root, self.asset_type, end=end, enriched_only=enriched_only,
+                          market=self.market)
 
-    def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
-        """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
-
-        enriched parquet 仅存 14 列。读取后需要即时计算 ma/ema/macd/kdj/rsi/boll/momentum/signal 等列。
-        对于最新日, 优先使用内存缓存 (已包含完整指标)。
-        """
+    def _load_enriched_for_date_raw(self, target_date: date) -> pl.DataFrame:
+        """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号（未做市场过滤）。"""
         self._assert_integrity(target_date, enriched_only=True)
-        # 优先使用 repo 最新日缓存
-        cache, cache_date = self.repo.get_enriched_latest_asset(self.asset_type)
-        if cache is not None and not cache.is_empty() and cache_date == target_date:
-            return _join_instruments(cache, self.repo.get_instruments_asset(self.asset_type))
+        # repo 的最新日/历史缓存是按 A 股口径（compute_all(market="cn") + A 股维表）
+        # 构建的单一快照, 港美股读它会拿到被 A 股维表 join 掉 name/float_shares 的行
+        # (换手率/市值全空), 因此非 cn 一律走下面的 parquet + 按市场即时计算路径。
+        if self.market == "cn":
+            cache, cache_date = self.repo.get_enriched_latest_asset(self.asset_type)
+            if cache is not None and not cache.is_empty() and cache_date == target_date:
+                return _join_instruments(cache, self._market_instruments())
 
         # 尝试从 repo 级预计算历史缓存中提取目标日期 (仅 stock: 该缓存为股票专用)
-        if self.asset_type == "stock":
+        if self.asset_type == "stock" and self.market == "cn":
             cached_hist = self.repo.get_enriched_history(target_date, 1)
             if cached_hist is not None and not cached_hist.is_empty() and "date" in cached_hist.columns:
                 df = cached_hist.filter(pl.col("date") == target_date)
@@ -155,6 +192,21 @@ class ScreenerService:
         # 即时计算指标: 需要加载历史窗口作 warmup
         df_full = self._compute_enriched_full(df, target_date)
         return df_full
+
+    def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
+        """读取指定日期 enriched 并按实例 market 过滤（共享存储逻辑隔离）。"""
+        if self.market == "cn":
+            return self._filter_market(self._load_enriched_for_date_raw(target_date))
+        # 港美股不走 A 股内存缓存, 每次都要扫 warmup 窗口并即时算指标 (秒级)。
+        # 概览/快照/梯队会在同一屏内连续请求, 用 60s 进程内缓存挡住重复计算。
+        key = (self.asset_type, self.market, target_date)
+        now = time.monotonic()
+        cached = _market_day_cache.get(key)
+        if cached is not None and now - cached[0] < _MARKET_DAY_CACHE_TTL:
+            return cached[1]
+        df = self._filter_market(self._load_enriched_for_date_raw(target_date))
+        _market_day_cache[key] = (now, df)
+        return df
 
     def load_prior_consecutive(self, as_of: date, consec_col: str) -> pl.DataFrame:
         """窄读: 仅取前一交易日的 [symbol, consec_col] 两列 (谓词下推到单日 parquet)。
@@ -236,19 +288,26 @@ class ScreenerService:
         # turnover_rate 是 enriched 存储列, 必须随行透传: 否则即时计算后该列
         # 丢失, 自定义 SQL 用它做条件会 Binder Error 被吞成空结果 (#187)
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
+                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate",
+                     "quote_ts"]  # 实时快照时间戳: 港美股慢路径透传给新鲜度判定
 
         try:
+            from app.markets import symbol_filter_expr
+
             lf = (
                 scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
                 .filter(
                     (pl.col("date") >= start)
                     & (pl.col("date") <= target_date)
                 )
+                # 共享 parquet 里同时存着 A 股/港股/美股; 市场过滤必须下推到
+                # collect 之前, 否则港美股单次总览会把 150 天全市场宽帧收进
+                # 内存再丢弃, 是容器 OOM 的主要来源。
+                .filter(symbol_filter_expr(self.market))
                 .sort(["symbol", "date"])
             )
-            available = [c for c in read_cols if c in lf.schema]
-            df_hist = lf.select(available).collect()
+            available = [c for c in read_cols if c in lf.collect_schema().names()]
+            df_hist = guarded_collect(lf.select(available), priority="interactive")
         except Exception as e:  # noqa: BLE001
             logger.warning("warmup history load failed: %s", e)
             df_hist = df_target
@@ -256,17 +315,33 @@ class ScreenerService:
         if df_hist.is_empty():
             df_hist = df_target
 
+        # 共享存储: 先切出本市场, 否则 A 股维表的涨跌停/换手率会作用到港美股行
+        from app.markets import filter_symbols
+        df_hist = filter_symbols(df_hist, self.market)
+
         # 计算指标
         df_full = compute_indicators(df_hist)
         df_full = compute_signals(df_full)
 
         # 计算涨跌停信号 (需要 instruments; 涨停为股票专有, ETF 跳过)
-        instruments = self.repo.get_instruments_asset(self.asset_type)
-        if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
+        instruments = self._market_instruments()
+        if self.asset_type == "stock" and self.market == "cn" and instruments is not None and not instruments.is_empty():
             df_full = compute_limit_signals(
                 df_full,
                 instruments,
                 historical_shares=self.repo.get_historical_shares(),
+            )
+        elif self.asset_type == "stock" and self.market != "cn":
+            # 港美股无涨跌停/连板: 补齐列契约 (恒 false/0), 且不覆盖存储里的
+            # turnover_rate —— compute_limit_signals 会用 A 股维表重算换手率,
+            # 对港美股只会算出 null。
+            df_full = df_full.with_columns(
+                pl.lit(False).alias("signal_limit_up"),
+                pl.lit(False).alias("signal_limit_down"),
+                pl.lit(False).alias("signal_limit_down_recovery"),
+                pl.lit(False).alias("signal_broken_limit_up"),
+                pl.lit(0).alias("consecutive_limit_ups"),
+                pl.lit(0).alias("consecutive_limit_downs"),
             )
 
         # 只保留目标日期
@@ -274,20 +349,19 @@ class ScreenerService:
 
         return _join_instruments(df_result, instruments)
 
-    def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
-        """读取目标日期之前的基础行情数据, 供历史窗口策略使用。
+    def _load_enriched_history_raw(self, target_date: date, lookback_days: int) -> pl.DataFrame:
+        """读取目标日期之前的基础行情数据（未做市场过滤）。
 
-        优先从 repo 内存缓存获取 (启动时已预计算), 命中时 0ms。
         缓存 miss 时走 scan_parquet + compute_indicators 慢路径。
         """
         self._assert_integrity(target_date, enriched_only=True)
         # 优先级 1: repo 级预计算缓存 (启动时 _refresh_enriched 已计算完整历史; 仅 stock)
         t0 = time.perf_counter()
-        if self.asset_type == "stock":
+        if self.asset_type == "stock" and self.market == "cn":
             cached = self.repo.get_enriched_history(target_date, lookback_days)
             if cached is not None and not cached.is_empty():
                 # JOIN instruments (repo 缓存不含 name 等列)
-                instruments = self.repo.get_instruments_asset(self.asset_type)
+                instruments = self._market_instruments()
                 if instruments is not None and not instruments.is_empty() and "name" not in cached.columns:
                     inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"]
                                  if c in instruments.columns]
@@ -298,7 +372,8 @@ class ScreenerService:
                 return cached
 
         # 优先级 2: 进程级 history_cache (之前的 TTL 缓存)
-        cache_key = (self.asset_type, target_date, lookback_days)
+        # market 进入缓存键: 共享存储下不同市场必须隔离, 否则切换市场命中旧结果。
+        cache_key = (self.asset_type, self.market, target_date, lookback_days)
         now = time.monotonic()
         ttl_cached = _history_cache.get(cache_key)
         if ttl_cached is not None:
@@ -323,16 +398,22 @@ class ScreenerService:
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         # 同 _compute_enriched_full: turnover_rate 存储列随行透传 (#187)
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
+                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate",
+                     "quote_ts"]  # 实时快照时间戳: 港美股慢路径透传给新鲜度判定
 
         try:
+            from app.markets import symbol_filter_expr
+
             lf = (
                 scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
                 .filter((pl.col("date") >= start) & (pl.col("date") <= target_date))
+                # 与 _compute_enriched_full 同理: 先在 scan 阶段裁掉其它市场,
+                # 避免 180 天全市场宽帧进内存后再 filter_symbols 丢弃。
+                .filter(symbol_filter_expr(self.market))
                 .sort(["symbol", "date"])
             )
             available = [c for c in read_cols if c in lf.collect_schema().names()]
-            df_hist = lf.select(available).collect()
+            df_hist = guarded_collect(lf.select(available), priority="interactive")
         except Exception as e:  # noqa: BLE001
             logger.warning("load_enriched_history failed: %s", e)
             return pl.DataFrame()
@@ -340,15 +421,27 @@ class ScreenerService:
         if df_hist.is_empty():
             return pl.DataFrame()
 
+        from app.markets import filter_symbols
+        df_hist = filter_symbols(df_hist, self.market)
+
         df_full = compute_indicators(df_hist)
         df_full = compute_signals(df_full)
 
-        instruments = self.repo.get_instruments_asset(self.asset_type)
-        if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
+        instruments = self._market_instruments()
+        if self.asset_type == "stock" and self.market == "cn" and instruments is not None and not instruments.is_empty():
             df_full = compute_limit_signals(
                 df_full,
                 instruments,
                 historical_shares=self.repo.get_historical_shares(),
+            )
+        elif self.asset_type == "stock" and self.market != "cn":
+            df_full = df_full.with_columns(
+                pl.lit(False).alias("signal_limit_up"),
+                pl.lit(False).alias("signal_limit_down"),
+                pl.lit(False).alias("signal_limit_down_recovery"),
+                pl.lit(False).alias("signal_broken_limit_up"),
+                pl.lit(0).alias("consecutive_limit_ups"),
+                pl.lit(0).alias("consecutive_limit_downs"),
             )
 
         if instruments is not None and not instruments.is_empty():
@@ -385,6 +478,10 @@ class ScreenerService:
                 del _history_cache[oldest]
 
         return df_full
+
+    def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
+        """读取历史窗口并按实例 market 过滤（共享存储逻辑隔离）。"""
+        return self._filter_market(self._load_enriched_history_raw(target_date, lookback_days))
 
     def run(
         self,
@@ -546,6 +643,11 @@ class ScreenerService:
         return df
 
     def latest_date(self) -> date | None:
+        if self.market != "cn":
+            # 共享存储：全局最新日期可能只有 A 股数据。hk/us 需要找到「本市场
+            # 确实有数据」的最新分区，否则未同步时会错误显示 A 股日期。
+            return self._latest_date_for_market()
+
         if self.asset_type != "stock":
             _, d = self.repo.get_enriched_latest_asset(self.asset_type)
             return d
@@ -563,6 +665,68 @@ class ScreenerService:
         except Exception:  # noqa: BLE001
             return None
         return None
+
+    def _latest_date_for_market(self, scan_limit: int = 10) -> date | None:
+        """返回本市场「最近且有足够覆盖」的 enriched 日期。
+
+        共享存储下, 港美股盘后同步/盘中落库可能只写入少量标的, 若按「有任意
+        一行就返回」会选中这种半成品分区 (实测 11-26 只有 45 只港股/0 只美股),
+        把前一完整交易日 2000+ 只的数据遮蔽掉, 看板于是只剩几十个标的。
+        改为: 统计最近 scan_limit 个分区的本市场标的数, 返回最近一个覆盖达到
+        近窗最大值一半的日期; 全都偏少时退回最近日期。
+        """
+        from app.markets import symbol_filter_expr
+
+        cache_key = (self.market, self.asset_type)
+        now = time.monotonic()
+        cached = _market_latest_cache.get(cache_key)
+        if cached is not None and now - cached[0] < _MARKET_LATEST_TTL:
+            return cached[1]
+
+        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        try:
+            parts = [p for p in enriched_dir.iterdir() if p.name.startswith("date=")]
+        except OSError:
+            return None
+        days: list[date] = []
+        for p in parts:
+            try:
+                days.append(date.fromisoformat(p.name[5:]))
+            except ValueError:
+                continue
+        days.sort(reverse=True)
+
+        counts: list[tuple[date, int]] = []
+        for day in days[:scan_limit]:
+            part = enriched_dir / f"date={day.isoformat()}" / "part.parquet"
+            if not part.exists():
+                continue
+            try:
+                lf = pl.scan_parquet(str(part))
+                if "symbol" not in lf.collect_schema().names():
+                    continue
+                n = (
+                    lf.select(symbol_filter_expr(self.market).alias("_hit"))
+                    .filter(pl.col("_hit"))
+                    .select(pl.len())
+                    .collect()
+                    .item()
+                )
+                if n:
+                    counts.append((day, int(n)))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("latest_date_for_market scan failed for %s: %s", day, e)
+                continue
+
+        result: date | None
+        if not counts:
+            result = None
+        else:
+            best = max(n for _, n in counts)
+            threshold = max(1, best // 2)
+            result = next((d for d, n in counts if n >= threshold), counts[0][0])
+        _market_latest_cache[cache_key] = (now, result)
+        return result
 
     def coverage_warnings(self, as_of: date, *, required_bars: int | None = None) -> list[str]:
         """数据充足性提示 (#303): enriched 覆盖不足时返回用户可读警告, 充足返回 []。

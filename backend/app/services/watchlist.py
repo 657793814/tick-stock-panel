@@ -314,7 +314,12 @@ def delete_group(group_id: str) -> tuple[list[dict], list[dict]]:
         remaining = [group for group in groups if group["id"] != group_id]
         _write_entries(df)
         _write_groups(remaining)
-        return remaining, df.to_dicts()
+    # 分组被删 → 绑定该分组的监控规则要在列表里立刻标注「已暂停」,
+    # 不能等 15s 缓存过期。
+    from app import cache_store
+
+    cache_store.invalidate_namespace("monitor-rules")
+    return remaining, df.to_dicts()
 
 
 def set_group(symbol: str, group_id: str | None) -> list[dict]:

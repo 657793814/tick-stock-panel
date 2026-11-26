@@ -214,6 +214,8 @@ export function startBacktest(params: {
   asset_type?: 'stock' | 'etf'
   minute_fill?: boolean
   regime_filter?: { states?: string[]; min_score?: number } | null
+  /** 市场 (cn|hk|us): 标的池按市场校验, 费用按市场口径 (港/美无涨跌停) */
+  market?: 'cn' | 'hk' | 'us'
   /** 忽略服务端同参数任务的结果缓存 (5 分钟), 必然重新计算; 重连/取消按 qs 对齐同一任务 */
   force?: boolean
 }): void {
@@ -249,6 +251,7 @@ export function startBacktest(params: {
     asset_type: params.asset_type,
     minute_fill: params.minute_fill,
     regime_filter: params.regime_filter ? JSON.stringify(params.regime_filter) : undefined,
+    market: params.market,
     force: params.force ? 1 : undefined,
   })
 

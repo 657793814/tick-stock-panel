@@ -40,15 +40,16 @@ export const QK = {
   capabilityMatrix: ['capability-matrix'] as const,
   quoteStatus:    ['quote-status'] as const,
   quoteInterval:  ['quote-interval'] as const,
-  overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
+  overviewMarket: (asOf?: string, market = 'cn') => ['overview-market', market, asOf ?? 'latest'] as const,
   indexQuotes:    ['index-quotes'] as const,
+  marketIndexScope: (market: string) => ['market-index-scope', market] as const,
 
   // Watchlist
   watchlist:            ['watchlist'] as const,
   watchlistGroups:      ['watchlist-groups'] as const,
   watchlistPrepare:     (symbols: string[]) => ['watchlist-prepare', symbols] as const,
   watchlistQuotes:      ['watchlist-quotes'] as const,
-  watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext ?? ''] as const,
+  watchlistEnriched:    (ext?: string, market?: string) => ['watchlist-enriched', ext ?? '', market ?? 'cn'] as const,
   // 异动边缘总览 (开启监控时才查询, 参数为 min_closeness/limit)
   abnormalOverview:     (minCloseness: number, limit: number) => ['abnormal-overview', minCloseness, limit] as const,
   // 盘中异动信号聚合 (异动监控「盘中」tab)
@@ -65,24 +66,24 @@ export const QK = {
   // 同上不嵌 symbols: 单 key + 按 symbol 增量合并, 请求集合由视口收敛
   // (见 lib/minuteBatchIncremental.ts)。
   minuteBatch:          () => ['minute-batch'] as const,
-  instrumentSearch:     (q: string, assetTypes?: string) => ['instrument-search', q, assetTypes ?? 'stock'] as const,
+  instrumentSearch:     (q: string, assetTypes?: string, market?: string) => ['instrument-search', q, assetTypes ?? 'stock', market ?? 'cn'] as const,
 
   // Screener
   screener:             ['screener'] as const,
-  screenerStrategies:   (assetType: string = 'stock', timeframe: '1d' | '1m' | 'all' = '1d') => ['screener-strategies', assetType, timeframe] as const,
+  screenerStrategies:   (assetType: string = 'stock', timeframe: '1d' | '1m' | 'all' = '1d', market = 'cn') => ['screener-strategies', assetType, timeframe, market] as const,
   /** 策略池 v2 (后端权威: 条目/分组/档案库), 排序是本地视图偏好不进 key */
   strategyPool:         ['strategy-pool'] as const,
   strategyList:         (assetType: string = 'all', timeframe = '1d', includeResearch = false) =>
                           ['strategies', assetType, timeframe, includeResearch] as const,
-  screenerCachedSummary: ['screener-cached', 'summary'] as const,
-  screenerCachedResult: (strategyId: string, asOf?: string, ext?: string) => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? ''] as const,
-  screenerCached:       (asOf?: string, ext?: string) => ['screener-cached', 'all', asOf ?? '', ext ?? ''] as const,
+  screenerCachedSummary: (market = 'cn') => ['screener-cached', 'summary', market] as const,
+  screenerCachedResult: (strategyId: string, asOf?: string, ext?: string, market = 'cn') => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? '', market] as const,
+  screenerCached:       (asOf?: string, ext?: string, market = 'cn') => ['screener-cached', 'all', asOf ?? '', ext ?? '', market] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   /** 扩展列迷你图: 列集 (含显示周期和天数) + 日期 + 标的集。 */
   extSeriesAll:        ['ext-series'] as const,
   extSeries:           (colsKey: string, date?: string | null, symbolsKey?: string) => ['ext-series', colsKey, date ?? '', symbolsKey ?? ''] as const,
-  marketSnapshot:       ['market-snapshot'] as const,
-  limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,
+  marketSnapshot:       (market = 'cn') => ['market-snapshot', market] as const,
+  limitLadder:          (asOf?: string, market = 'cn') => ['limit-ladder', market, asOf] as const,
 
   // Backtest
   backtestStatus:       ['backtest-status'] as const,
@@ -112,6 +113,7 @@ export const QK = {
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,
+  marketDataStatus:     (market = 'cn') => ['market-data-status', market] as const,
   dataIntegrity:        ['data-integrity'] as const,
   /** 分钟数据缺口体检 (发现本地分区中不完整的 标的×交易日) */
   minuteGaps:           ['minute-gaps'] as const,
@@ -165,6 +167,8 @@ export const QK = {
   paperOverview:        (acc: string) => ['paper', 'overview', acc] as const,
   paperOrders:          (acc: string) => ['paper', 'orders', acc] as const,
   paperTrades:          (acc: string) => ['paper', 'trades', acc] as const,
+  paperReplaySymbols:   (acc: string) => ['paper', 'replay-symbols', acc] as const,
+  paperReplay:          (acc: string, symbol: string) => ['paper', 'replay', acc, symbol] as const,
   paperNav:             (acc: string) => ['paper', 'nav', acc] as const,
   paperStats:           (acc: string) => ['paper', 'stats', acc] as const,
   paperRounds:          (acc: string) => ['paper', 'rounds', acc] as const,
@@ -181,13 +185,13 @@ export const QK = {
   // 市场环境(Regime) — 日级离线计算, 不进 SSE 刷新
   // 历史查询键 = 实际请求三元组 (影响结果的参数全部进键): 'all' 在 coverage
   // 到达前后 start/end 不同 → 自动换键重拉, 不会把默认窗口数据当"全部"展示。
-  regimeHistory:        (range: { start?: string; end?: string; limit?: number }) =>
-                         ['regime-history', range.start ?? '', range.end ?? '', range.limit ?? 0] as const,
+  regimeHistory:        (range: { start?: string; end?: string; limit?: number }, market = 'cn') =>
+                         ['regime-history', market, range.start ?? '', range.end ?? '', range.limit ?? 0] as const,
   // 失效用裸前缀: 前缀匹配所有历史查询变体 (regimeHistory() 带哨兵值匹配不到任何键)
   regimeHistoryPrefix:  ['regime-history'] as const,
-  regimeLatest:         ['regime-latest'] as const,
-  regimeStates:         (days: number) => ['regime-states', days] as const,
-  regimeCoverage:       ['regime-coverage'] as const,
+  regimeLatest:         (market = 'cn') => ['regime-latest', market] as const,
+  regimeStates:         (days: number, market = 'cn') => ['regime-states', market, days] as const,
+  regimeCoverage:       (market = 'cn') => ['regime-coverage', market] as const,
   regimePhases:         (start?: string, end?: string) => ['regime-phases', start ?? '', end ?? ''] as const,
   regimeMainline:       (kind: string, start?: string, end?: string) => ['regime-mainline', kind, start ?? '', end ?? ''] as const,
   // 板块切换 (盘中轮动, 全量分钟聚合) — 30s 前端轮询刷新; seriesKey = 自定义展示板块清单,

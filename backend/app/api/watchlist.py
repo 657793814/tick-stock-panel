@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Callable, Literal
 
 import anyio
@@ -110,8 +110,20 @@ def _with_names(rows: list[dict], request: Request) -> list[dict]:
     if not rows:
         return rows
     try:
-        # 股票 + ETF 名称统一由 repo.get_name_map 解析, 自选列表可混合持有
-        name_by_symbol = request.app.state.repo.get_name_map([r.get("symbol") for r in rows])
+        # 按 symbol 后缀分市场取名称: A 股走 instruments 池, 港美股查各自维表。
+        # 自选可跨市场, 只用 A 股名称表会让港股行 name 恒为 null。
+        from app.markets import market_of
+
+        repo = request.app.state.repo
+        symbols = [r.get("symbol") for r in rows]
+        by_market: dict[str, set[str]] = {}
+        for s in symbols:
+            by_market.setdefault(market_of(str(s)), set()).add(str(s))
+        name_by_symbol: dict[str, str] = {}
+        for m, syms in by_market.items():
+            name_by_symbol.update(
+                {k: v for k, v in repo.get_market_name_map(m).items() if k in syms}
+            )
         if not name_by_symbol:
             return rows
         return [{**row, "name": name_by_symbol.get(row.get("symbol"))} for row in rows]
@@ -120,9 +132,33 @@ def _with_names(rows: list[dict], request: Request) -> list[dict]:
         return rows
 
 
+def _validate_market(market: str | None) -> str | None:
+    """自选的市场过滤参数: None = 不过滤 (旧调用方), 其余必须是注册表里的市场。
+
+    测试会直接调用端点函数 (不经过 FastAPI 解析), 此时 market 是 Query 默认值对象,
+    而不是 str —— 取它的 default, 与真实请求的行为保持一致。
+    """
+    if market is not None and not isinstance(market, str):
+        market = getattr(market, "default", None)
+    if market in (None, "", "all"):
+        return None
+    from app.markets import ALL_MARKETS
+
+    if market not in ALL_MARKETS:
+        raise HTTPException(400, f"非法市场 '{market}', 支持: {', '.join(ALL_MARKETS)}")
+    return market
+
+
 @router.get("")
-def list_all(request: Request):
-    return {"symbols": _with_names(watchlist.list_symbols(), request)}
+def list_all(request: Request, market: str | None = Query(None, description="按市场过滤: cn/hk/us")):
+    """自选列表。market 省略时返回全部（旧行为），前端按当前市场传参做隔离。"""
+    m = _validate_market(market)
+    rows = watchlist.list_symbols()
+    if m is not None:
+        from app.markets import market_of
+
+        rows = [r for r in rows if market_of(str(r.get("symbol", ""))) == m]
+    return {"symbols": _with_names(rows, request), "market": m}
 
 
 @router.post("")
@@ -500,10 +536,232 @@ def _latest_watchlist_rows(frame: pl.DataFrame, symbols: list[str]) -> pl.DataFr
     return selected.unique(subset=["symbol"], keep="first", maintain_order=True)
 
 
+def _market_base_closes(
+    repo, added_dates: dict[str, date], market: str,
+) -> pl.DataFrame:
+    """港美股「加入日基准价」: 只扫加入日这几个分区, 不做全量历史 scan。
+
+    A 股那份基准价来自 enriched 内存历史缓存 (本身只含 A 股), 港美股不在里面,
+    这里直接读 kline_daily 的对应日期分区并做市场切分。读不到的标的 (停牌/未同步)
+    由调用方降级成 null。
+    """
+    if not added_dates:
+        return pl.DataFrame()
+    from app.markets import filter_symbols
+
+    base = repo.store.data_dir
+
+    def _resolve(d: date, back: int = 10) -> date | None:
+        """加入日当天可能休市 (周末/假期), 回落到之前最近一个有分区的交易日。"""
+        for i in range(back + 1):
+            cand = d - timedelta(days=i)
+            if (base / "kline_daily" / f"date={cand}" / "part.parquet").exists():
+                return cand
+        return None
+
+    resolved: dict[str, date] = {}
+    for sym, d in added_dates.items():
+        rd = _resolve(d)
+        if rd is not None:
+            resolved[sym] = rd
+    if not resolved:
+        return pl.DataFrame()
+
+    wanted = set(resolved)
+    frames: list[pl.DataFrame] = []
+    for d in sorted(set(resolved.values())):
+        p = base / "kline_daily" / f"date={d}" / "part.parquet"
+        try:
+            sub = pl.read_parquet(p, columns=["symbol", "date", "close"])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("base close read failed for %s: %s", d, e)
+            continue
+        sub = filter_symbols(sub, market).filter(pl.col("symbol").is_in(list(wanted)))
+        if not sub.is_empty():
+            frames.append(sub)
+    if not frames:
+        return pl.DataFrame()
+    hist = pl.concat(frames, how="diagonal_relaxed").with_columns(
+        pl.col("date").cast(pl.Date)
+    )
+    added = pl.DataFrame(
+        {"symbol": list(resolved), "added_date": list(resolved.values())},
+        schema={"symbol": pl.Utf8, "added_date": pl.Date},
+    )
+    return (
+        hist.join(added, on="symbol", how="inner")
+        .filter(pl.col("date") == pl.col("added_date"))
+        .group_by("symbol")
+        .agg(pl.col("close").last().alias("base_close"))
+    )
+
+
+def _overlay_market_realtime(repo, df: pl.DataFrame, as_of, symbols: list[str]) -> pl.DataFrame:
+    """用当日 kline_daily 的实时快照覆盖 enriched 静态行的价格与 quote_ts。
+
+    跨市场实时服务(MarketQuoteService)只写 kline_daily —— 不能写 enriched 分区,
+    否则会 bump A 股 matrix generation、让 A 股 enriched 缓存预热反复失败。
+    故港美股自选在这里读日K把实时价叠加到 enriched 行; 无实时行的标的保留原值。
+    """
+    if df.is_empty() or as_of is None:
+        return df
+    daily_path = repo.store.data_dir / "kline_daily" / f"date={as_of}" / "part.parquet"
+    if not daily_path.exists():
+        return df
+    try:
+        rt = pl.read_parquet(
+            daily_path,
+            columns=["symbol", "close", "open", "high", "low", "volume", "amount", "quote_ts"],
+        )
+    except Exception:  # noqa: BLE001 - 日K缺列/损坏时降级为静态 enriched
+        return df
+    if rt.is_empty() or "quote_ts" not in rt.columns:
+        return df
+    rt = (
+        rt.filter(pl.col("symbol").is_in(symbols))
+        .filter(pl.col("quote_ts").is_not_null() & (pl.col("quote_ts") > 0))
+        .unique(subset=["symbol"], keep="last")
+    )
+    if rt.is_empty():
+        return df
+    overlay_cols = ["close", "open", "high", "low", "volume", "amount", "quote_ts"]
+    rt = rt.select(["symbol"] + [pl.col(c).alias(f"_rt_{c}") for c in overlay_cols])
+    out = df.join(rt, on="symbol", how="left")
+    exprs = []
+    for c in overlay_cols:
+        rt_col = f"_rt_{c}"
+        if c in out.columns:
+            exprs.append(pl.coalesce(pl.col(rt_col), pl.col(c)).alias(c))
+        else:
+            exprs.append(pl.col(rt_col).alias(c))
+    out = out.with_columns(exprs).drop([f"_rt_{c}" for c in overlay_cols])
+    return out
+
+
+def _watchlist_enriched_market(request: Request, market: str) -> dict:
+    """港美股自选表。
+
+    数据源与 cn 不同: cn 读 repo 的 A 股内存快照, 港美股走 ScreenerService 的
+    按市场慢路径 (parquet + 市场维表 + 即时指标)。列契约与 cn 对齐, 缺的列
+    (涨跌停价/连板/扩展字段) 一律 null —— 港美股本来就没有涨跌停。
+
+    ext_columns 对港美股无意义 (扩展数据表都是 A 股口径), 调用方传了也忽略。
+    """
+    t0 = time.perf_counter()
+    repo = request.app.state.repo
+    from app.markets import market_of
+
+    entries = [
+        r for r in watchlist.list_symbols()
+        if market_of(str(r.get("symbol", ""))) == market
+    ]
+    symbols = [r["symbol"] for r in entries]
+    empty = {"rows": [], "as_of": None, "elapsed_ms": 0,
+             "dates": {"stock": None, "etf": None, "index": None}, "market": market}
+    if not symbols:
+        return empty
+
+    from app.services.screener import ScreenerService
+
+    svc = ScreenerService(repo, market=market)
+    as_of = svc.latest_date()
+    if as_of is None:
+        return empty
+    frame = svc._load_enriched_for_date(as_of)
+    if frame is None or frame.is_empty():
+        return empty
+
+    df = frame.filter(pl.col("symbol").is_in(symbols))
+    if df.is_empty():
+        return empty
+
+    # 叠加当日实时快照(quote_ts/close) —— 实时价只写 kline_daily, 不写 enriched。
+    df = _overlay_market_realtime(repo, df, as_of, symbols)
+
+    # 名称 + 股本: 都取自该市场维表 (A 股 instruments 池里没有港股行)
+    name_map = repo.get_market_name_map(market)
+    df = df.with_columns(
+        pl.col("symbol").replace_strict(name_map, default=None, return_dtype=pl.Utf8).alias("name"),
+        pl.lit("stock").alias("asset_type"),
+        # 港美股无涨跌停: 显式给 null, 前端渲染 "—" 而不是沿用 A 股价格笼子
+        pl.lit(None, dtype=pl.Float64).alias("limit_up_price"),
+        pl.lit(None, dtype=pl.Float64).alias("limit_down_price"),
+    )
+    if "float_shares" not in df.columns:
+        inst = repo.get_instruments_market(market)
+        if not inst.is_empty() and {"symbol", "float_shares"}.issubset(inst.columns):
+            df = df.join(
+                inst.select(["symbol", "float_shares"]).unique(subset=["symbol"], keep="first"),
+                on="symbol", how="left",
+            )
+
+    keep = [c for c in _WATCHLIST_COLS + ["name", "float_shares", "asset_type"] if c in df.columns]
+    df = df.select(keep)
+
+    # 加入时间 + 加入以来涨跌幅 (与 cn 同口径: 加入日收盘价为基准)
+    added_at_df = pl.DataFrame(
+        {"symbol": symbols, "added_at": [(r.get("added_at") or None) for r in entries]},
+        schema={"symbol": pl.Utf8, "added_at": pl.Utf8},
+    )
+    df = df.join(added_at_df, on="symbol", how="left")
+    added_dates = _added_dates_bj(entries)
+    base_df = _market_base_closes(repo, added_dates, market)
+    if base_df.is_empty() or "close" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("pct_since_added"))
+    else:
+        df = (
+            df.join(base_df, on="symbol", how="left")
+            .with_columns(
+                pl.when(
+                    pl.col("base_close").is_not_null()
+                    & pl.col("base_close").is_finite()
+                    & (pl.col("base_close") > 0)
+                    & pl.col("close").is_not_null()
+                )
+                .then(pl.col("close") / pl.col("base_close") - 1.0)
+                .otherwise(None)
+                .alias("pct_since_added")
+            )
+            .drop("base_close")
+        )
+
+    # NaN/Inf 统一置 null, 前端不必逐列判断
+    float_cols = [c for c in df.columns if df[c].dtype.is_float()]
+    if float_cols:
+        df = df.with_columns([
+            pl.when(pl.col(c).is_nan() | pl.col(c).is_infinite()).then(None).otherwise(pl.col(c)).alias(c)
+            for c in float_cols
+        ])
+
+    order_map = {s: i for i, s in enumerate(symbols)}
+    df = df.with_columns(
+        pl.col("symbol").replace_strict(order_map, default=len(symbols), return_dtype=pl.Int32).alias("_sort_order")
+    ).sort("_sort_order").drop("_sort_order")
+
+    rows = df.to_dicts()
+    from app.services.quote_freshness import QuoteFreshness
+
+    freshness = QuoteFreshness.for_request(request)
+    # 港美股按市场时区/时段判定: 有 quote_ts 的实时快照显示 live, 仍是静态日K
+    # 的行降级为 historical(static_daily)。A 股内存快照路径不变。
+    for row in rows:
+        row["quote_freshness"] = freshness.describe(
+            row, market=market, static_daily=True,
+        )
+    return {
+        "rows": rows,
+        "as_of": str(as_of),
+        "elapsed_ms": (time.perf_counter() - t0) * 1000,
+        "dates": {"stock": str(as_of), "etf": None, "index": None},
+        "market": market,
+    }
+
+
 @router.get("/enriched")
 def watchlist_enriched(
     request: Request,
     ext_columns: str | None = Query(None, description="逗号分隔的 ext 列: config_id.field_name"),
+    market: str = Query("cn", description="逻辑市场: cn/hk/us"),
 ):
     """自选 enriched 数据 — 直接从 enriched 最新日读取, 无重计算。
 
@@ -512,11 +770,25 @@ def watchlist_enriched(
 
     ext_columns 参数示例: "industry_rating.score,fund_flow.net_inflow"
     会动态 LEFT JOIN 对应的 ext_{config_id} DuckDB view。
+
+    market: cn 走 A 股内存快照 (原路径, 零改动); hk/us 走按市场即时计算路径。
+    前端按当前市场传参, 保证切换市场后自选表不会混入其它市场的标的。
     """
+    m = _validate_market(market) or "cn"
+    if m != "cn":
+        return _watchlist_enriched_market(request, m)
+
     t0 = time.perf_counter()
 
     repo = request.app.state.repo
-    entries = watchlist.list_symbols()
+    # 自选可跨市场持有: cn 路径只取 A 股条目, 否则港股行会以「指标全 null」的形式
+    # 混进 A 股自选表 (共享存储切分后 enriched 里已没有港美股行)。
+    from app.markets import market_of
+
+    entries = [
+        r for r in watchlist.list_symbols()
+        if market_of(str(r.get("symbol", ""))) == "cn"
+    ]
     symbols = [r["symbol"] for r in entries]
     if not symbols:
         return {"rows": [], "as_of": None, "elapsed_ms": 0,

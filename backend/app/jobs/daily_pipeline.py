@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import date as _date
+from datetime import timedelta as _td
 from pathlib import Path
 
 import polars as pl
@@ -132,6 +134,23 @@ def _noop(stage: str, pct: int, msg: str, **kwargs) -> None:  # noqa: ARG001
     pass
 
 
+def _workday_gap(from_date: _date, to_date: _date) -> int:
+    """统计 (from_date, to_date] 内的工作日数（周末不计）。
+
+    用于判断同步后数据是否落后于请求区间终点。港美股本地节假日与 A 股不完全
+    一致，极端情况下会误报；此处仅作提示，不改变任务成功状态。
+    """
+    if from_date >= to_date:
+        return 0
+    gap = 0
+    day = from_date + _td(days=1)
+    while day <= to_date:
+        if day.weekday() < 5:
+            gap += 1
+        day += _td(days=1)
+    return gap
+
+
 def _invalidate(table: str | None = None) -> None:
     """stage 写完调用,让 /api/data/status 只重算被影响的那张表。"""
     from app.api.data import invalidate_data_cache
@@ -178,6 +197,234 @@ def run_instruments_sync(repo: KlineRepository) -> dict:
         repo.clear_cache()
         repo.refresh_cache()
     return {"instruments_rows": rows}
+
+
+def _market_sync_state_path(data_dir, market: str) -> Path:
+    return Path(data_dir) / f".market_sync_{market}.json"
+
+
+def _load_synced_symbols(data_dir, market: str) -> set[str]:
+    """已成功同步过日K的标的（港美股按市场记账）。
+
+    免费档拉到全市场美股需要上小时, 同步支持 limit 分次推进。没有这份账本时
+    每次 limit 都取同样的一批（按代码排序靠前的）, 反复点「更新」永远只覆盖
+    前 N 只; 有了它就能把「还没同步过」的标的排在前面, 分几次把覆盖面铺满。
+    """
+    import json
+
+    try:
+        payload = json.loads(_market_sync_state_path(data_dir, market).read_text())
+        symbols = payload.get("symbols") or []
+        return {str(s) for s in symbols if s}
+    except Exception:  # noqa: BLE001 — 账本损坏等价于「没同步过」, 不阻塞同步
+        return set()
+
+
+def _save_synced_symbols(data_dir, market: str, symbols: list[str]) -> None:
+    import json
+
+    path = _market_sync_state_path(data_dir, market)
+    merged = _load_synced_symbols(data_dir, market) | set(symbols)
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"market": market, "symbols": sorted(merged)}))
+        tmp.replace(path)
+    except Exception as e:  # noqa: BLE001 — 仅影响下次排序, 不影响数据正确性
+        logger.warning("%s 同步账本写入失败: %s", market, e)
+
+
+def run_market_sync(
+    market: str,
+    repo: KlineRepository,
+    on_progress: ProgressCb | None = None,
+    count_days: int = 400,
+    capset: CapabilitySet | None = None,
+    max_symbols: int | None = None,
+    refresh_synced: bool = False,
+    sync_indices: bool = True,
+) -> dict:
+    """港美股数据同步 + enriched 计算（多市场扩展）。
+
+    流程: 个股维表(market 过滤) → 日K(前复权批量拉取) → enriched 计算。
+    A 股走 run_now；本函数服务港美股，供 POST /api/pipeline/run-market 按需触发。
+
+    本地存储口径适配（现状适配，非照搬参考目录结构）: 本地 A 股只有单一 stock 日K/
+    enriched 存储，无港美股独立目录；此处把 hk/us 日K 写入同一 kline_daily /
+    kline_daily_enriched，由既有 run_pipeline 统一计算 enriched（merge-upsert，
+    只对指定市场标的重算，不触碰 A 股）。参考实现的 kline_daily_{hk,us} 目录拆分
+    与本地现状冲突，按 Team 工作准则「现状适配」改为共享存储。
+
+    返回: {"universe": n, "daily_rows": n, "enriched_rows": n, "skipped": [...]}
+
+    capset: 可选能力集，用于按当前档位取日K批量大小/速率；缺省沿用 100/60。
+    max_symbols: 可选上限，只同步前 N 只标的（试跑/受限于带宽时用）。
+    refresh_synced: 增量模式。只刷新「账本里已同步过」的标的，不再优先拉未同步标的。
+        供定时任务使用: 每日只补最近几天, 覆盖面的扩张仍由手动同步推进
+        （否则每次 cron 都要把 1.2 万只美股全量拉一遍）。
+    sync_indices: 是否顺带同步该市场主要指数（港美股指数不走 TickFlow，见
+        services.index_sync_market）。失败只记 skipped, 不阻断个股同步。
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    emit = on_progress or _noop
+    skipped: list[str] = []
+
+    # Step -1: 该市场主要指数（腾讯免费源）。指数与个股互不依赖, 失败不影响个股同步;
+    # 之前只有 /api/indices/market 的 POST 会触发, 定时/手动同步个股后指数永远停在
+    # 首次点击那天, 指数页显示的是陈旧收盘。
+    if sync_indices:
+        emit("sync_indices", 2, f"同步{market}主要指数…")
+        try:
+            from app.services import index_sync_market
+            idx_rows = index_sync_market.sync_market_indices(market, repo.store.data_dir)
+            emit("sync_indices", 4, f"{market} 指数同步完成,{idx_rows} 行")
+        except Exception as e:  # noqa: BLE001 — 指数只是展示层, 不影响个股管道
+            logger.warning("%s 指数同步失败: %s", market, e)
+            skipped.append("indices")
+
+    # Step 0: 该市场个股维表（单独存放，不污染 A 股 stock 池）
+    # 维表缺失时自动同步一次：港美股维表由 instrument_sync.sync_market_instruments
+    # 写入 instruments_index_{market}/，此前没有任何调用方，导致 run-market 恒返回
+    # 「无标的」——这正是切到港美股后处处空白的原因。
+    inst = repo.get_instruments_market(market)
+    if inst.is_empty() or "symbol" not in inst.columns:
+        emit("sync_instruments", 3, f"同步{market}个股维表…")
+        try:
+            inst_rows = instrument_sync.sync_market_instruments(repo.store.data_dir, market)
+            emit("sync_instruments", 8, f"{market} 维表同步完成,{inst_rows} 只标的")
+        except Exception as e:  # noqa: BLE001 — 上游不可用时如实回报, 不静默
+            logger.warning("%s 个股维表同步失败: %s", market, e)
+            skipped.append("instruments")
+        inst = repo.get_instruments_market(market)
+
+    universe: list[str] = []
+    if not inst.is_empty() and "symbol" in inst.columns:
+        from app.markets import filter_symbols
+        inst = filter_symbols(inst, market)
+        universe = sorted(inst["symbol"].to_list())
+    if not universe:
+        emit("resolve_universe", 10, f"{market} 无标的（个股维表为空，请稍后重试）")
+        return {"universe": 0, "daily_rows": 0, "enriched_rows": 0,
+                "skipped": [*skipped, "universe"]}
+    total_instruments = len(universe)
+    if refresh_synced:
+        # 增量: 只碰已同步过的标的。一只都没同步过时退回全量, 否则定时任务永远空跑。
+        synced = _load_synced_symbols(repo.store.data_dir, market)
+        if synced:
+            universe = [s for s in universe if s in synced]
+            if not universe:
+                return {"universe": 0, "daily_rows": 0, "enriched_rows": 0,
+                        "skipped": [*skipped, "universe"],
+                        "coverage": {"synced": len(synced), "instruments": total_instruments}}
+    if max_symbols and len(universe) > max_symbols:
+        # 未同步过的优先, 让「分次同步」自然推进覆盖面而不是每次都拉同一批。
+        synced = _load_synced_symbols(repo.store.data_dir, market)
+        fresh = [s for s in universe if s not in synced]
+        stale = [s for s in universe if s in synced]
+        universe = (fresh + stale)[:max_symbols]
+    emit("resolve_universe", 10, f"{market} 标的池:{len(universe)} 只"
+         + ("（增量刷新已同步标的）" if refresh_synced else "")
+         + (f"（维表共 {total_instruments} 只）" if total_instruments > len(universe) else ""))
+
+    def _coverage() -> dict:
+        """本市场日K覆盖进度: 已同步过 / 维表总数。供前端提示「还没同步完」。"""
+        return {
+            "synced": len(_load_synced_symbols(repo.store.data_dir, market)),
+            "instruments": total_instruments,
+        }
+
+    # Step 1: 日K（forward 前复权，港美股无除权因子表）
+    end = _dt.now()
+    start = end - _td(days=count_days)
+    emit("sync_daily", 12, f"获取 {market} 日K [{start.date()} ~ {end.date()}]…")
+
+    batch_size, rpm = 100, 60
+    if capset is not None:
+        try:
+            from app.tickflow.capabilities import Cap
+            from app.tickflow.rate_limits import resolve_limit
+            if capset.has(Cap.KLINE_DAILY_BATCH):
+                lim = resolve_limit(capset, Cap.KLINE_DAILY_BATCH, default_batch=100)
+                batch_size, rpm = lim.batch, lim.rpm
+        except Exception as e:  # noqa: BLE001 — 能力集异常只影响速率, 不影响正确性
+            logger.warning("读取日K批量上限失败, 沿用默认 100/60: %s", e)
+
+    def _chunk(cur: int, tot: int) -> None:
+        emit("sync_daily", 12 + int(30 * cur / tot),
+             f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+
+    failed: list[str] = []
+    df = kline_sync.sync_daily_batch(
+        universe,
+        batch_size=batch_size, rpm=rpm,
+        start_time=start, end_time=end,
+        on_chunk_done=_chunk,
+        adjust="forward",
+        failed_out=failed,
+    )
+    if failed:
+        skipped.append("daily_partial")
+    if df.is_empty():
+        emit("sync_daily", 45, f"{market} 日K 未获取到数据")
+        return {"universe": len(universe), "daily_rows": 0, "enriched_rows": 0,
+                "skipped": [*skipped, "daily"], "coverage": _coverage()}
+    repo.append_daily(df)
+    daily_rows = df.height
+    _save_synced_symbols(repo.store.data_dir, market, sorted(set(df["symbol"].to_list())))
+    emit("sync_daily", 45, f"{market} 日K 写入 {daily_rows} 行")
+    repo.refresh_cache()
+
+    # 缺口告警: 对比「实际落地最新交易日」与「请求区间终点」。
+    # 曾出现任务报成功(写入行数正常)但当天个股K线未发布,落地停在上一交易日,
+    # 自选因而显示过期数据 —— 此处把差值显式记入日志与 result,避免误判。
+    fetched_latest = df["date"].max()
+    gap_weekdays = _workday_gap(fetched_latest, end.date())
+    freshness = {
+        "requested_end": end.date().isoformat(),
+        "fetched_latest": fetched_latest.isoformat(),
+        "gap_weekdays": gap_weekdays,
+    }
+    if gap_weekdays > 0:
+        msg = (f"{market} 日K 落后请求区间终点 {gap_weekdays} 个工作日: "
+               f"最新 {fetched_latest}, 请求至 {end.date()}"
+               "（数据源可能尚未发布当日数据，自选将展示已落地的最新交易日）")
+        logger.warning("market sync freshness gap: %s", msg)
+        emit("sync_daily", 46, msg)
+
+    # Step 2: enriched 计算（只重算该市场标的，merge-upsert，不触碰 A 股）
+    emit("compute_enriched", 60, f"计算 {market} enriched 指标…")
+    try:
+        enriched_rows = run_pipeline(
+            symbols=universe,
+            market=market,
+            on_batch_done=lambda cur, tot: emit(
+                "compute_enriched", 60 + int(33 * cur / tot),
+                f"{market} enriched 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("%s enriched 计算失败", market)
+        skipped.append("enriched")
+        enriched_rows = 0
+    emit("compute_enriched", 90, f"{market} enriched 完成,{enriched_rows} 行")
+    repo.refresh_cache()
+    # 选股侧有进程内 TTL 缓存 (历史窗口 + 港美股单日帧), 同步完成后立即失效,
+    # 否则页面最多 1 分钟内仍显示同步前的空结果。
+    try:
+        from app.services.screener import ScreenerService
+        ScreenerService.clear_history_cache()
+    except Exception as e:  # noqa: BLE001 — 缓存清理失败不影响已落盘的数据
+        logger.warning("清理选股缓存失败: %s", e)
+
+    # 刷新 DuckDB 视图（新 parquet 已写入）
+    try:
+        repo.store._register_views()  # noqa: SLF001
+    except Exception as e:  # noqa: BLE001
+        logger.warning("refresh views failed: %s", e)
+    emit("done", 100, f"{market} 管道完成")
+    return {"market": market, "universe": len(universe), "daily_rows": daily_rows,
+            "enriched_rows": enriched_rows, "skipped": skipped,
+            "coverage": _coverage(), "freshness": freshness}
 
 
 def run_now(
@@ -768,15 +1015,21 @@ def run_now(
         from app.strategy import paper as paper_trading
         # 逐账户结算 (账户间订单/台账隔离), 汇总合并供日志与结果展示
         totals = {"filled": 0, "expired": 0, "corp_actions": 0, "nav": None, "accounts": []}
+        settled_days: set[str] = set()
         for acc_id in paper_trading.list_account_ids(repo.store.data_dir):
-            s = paper_trading.settle_day(repo.store.data_dir, today.isoformat(), account_id=acc_id)
+            # 补结算: 停机/管道在日K阶段失败会让那一整天没人撮合, 顺延单会一直
+            # 挂 pending (页面表现为「全是待成交」)。这里回放到 today, 幂等。
+            s = paper_trading.settle_pending_days(repo.store.data_dir, today.isoformat(), account_id=acc_id)
             totals["filled"] += s.get("filled", 0)
             totals["expired"] += s.get("expired", 0)
             totals["corp_actions"] += s.get("corp_actions", 0)
             if s.get("nav") is not None:
                 totals["nav"] = s["nav"]
+            settled_days.update(s.get("settled_days") or [])
             totals["accounts"].append({"account": acc_id, **{k: s.get(k) for k in ("filled", "expired", "corp_actions")}})
-        paper_summary = totals
+        paper_summary = {**totals, "settled_days": sorted(settled_days)}
+        if len(settled_days) > 1:
+            logger.warning("paper_settle 补结算 %d 个交易日: %s", len(settled_days), sorted(settled_days))
         if paper_summary.get("filled") or paper_summary.get("corp_actions"):
             logger.info("paper_settle: %s", paper_summary)
         # 结算成交留痕 (V3): next_open/close 单的成交发生在盘后管道内, 盘中钩子
@@ -1236,9 +1489,11 @@ def _maybe_push_review(content: str, meta: dict) -> None:
     """
     try:
         from app import secrets_store
-        from app.services import email_adapter, preferences, webhook_adapter
+        from app.services import email_adapter, feishu_app, preferences, webhook_adapter
+        from app.services.wecom_bot_service import WecomBotService
 
-        channels = preferences.get_review_push_channels()
+        enabled_channels = set(preferences.get_webhook_enabled_channels())
+        channels = [c for c in preferences.get_review_push_channels() if c in enabled_channels]
         if not channels:
             return
 
@@ -1282,6 +1537,25 @@ def _maybe_push_review(content: str, meta: dict) -> None:
                     secrets_store.get_custom_webhook_secret(),
                 )
                 logger.info("review push(custom) %s", "sent" if ok else "failed")
+            elif ch == "feishu_app":
+                app_id = preferences.get_feishu_app_id()
+                app_secret = secrets_store.get_feishu_app_secret()
+                chat_id = preferences.get_feishu_app_chat_id()
+                if not feishu_app.is_configured(app_id, app_secret, chat_id):
+                    logger.info("review push(feishu_app) skipped: app bot not configured")
+                    continue
+                body = (f"{subtitle}\n\n{content}" if subtitle else content)
+                ok = feishu_app.send_text(app_id, app_secret, chat_id, "每日复盘", body)
+                logger.info("review push(feishu_app) %s", "sent" if ok else "failed")
+            elif ch == "wecom_bot":
+                bot_svc = WecomBotService.instance()
+                chat_id = preferences.get_wecom_bot_chat_id()
+                if bot_svc is None or not chat_id or not bot_svc.status().get("connected"):
+                    logger.info("review push(wecom_bot) skipped: bot not connected or no chat")
+                    continue
+                body = (f"{subtitle}\n\n{content}" if subtitle else content)
+                ok, err = bot_svc.send_text(chat_id, f"每日复盘\n{body}")
+                logger.info("review push(wecom_bot) %s %s", "sent" if ok else "failed", err if not ok else "")
             elif ch == "email":
                 config = preferences.get_email_smtp_config()
                 if not email_adapter.is_configured(config):
@@ -1385,6 +1659,40 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         misfire_grace_time=3600,
         replace_existing=True,
     )
+
+    # 港美股盘后增量: 各自收盘 + 数据源落库后跑一次, 只刷新已同步过的标的。
+    # 港股 16:50、美股次日 08:40（北京时间）。之前港美股只有「手动点同步」这一条
+    # 入口, 不点就永远停在首次拉取那天, 于是切市场常常看到上周的收盘价。
+    def _market_sync_task(market: str, count_days: int, on_progress=None):
+        app_state = _get_app_state()
+        capset_live = getattr(app_state, "capabilities", None) or capset
+        result = run_market_sync(
+            market, repo, on_progress=on_progress, capset=capset_live,
+            count_days=count_days, refresh_synced=True,
+        )
+        repo.refresh_cache()
+        return result
+
+    # 美股时点说明(2026-11 实测): 16:00 ET 收盘 = 北京 05:00(冬令)/04:00(夏令),
+    # 数据源聚合官方日K还要 1~2 小时, 原定 06:40 跑只落到前一交易日(11-25 06:42
+    # 那轮止于 11-23, 11-24 全市场缺失), 于是美股日期稳定落后一天。08:40 北京 =
+    # 收盘后 3.5~4.5 小时, 留足发布窗口; 8 分钟量级在 09:10 维表任务前跑完。
+    # 周五场次收盘在北京周六清晨, 故周六补跑一轮, 否则周五K要等到周一才落地。
+    for _mkt, _hour, _minute, _days, _dow in (
+        ("hk", 16, 50, 30, "mon-fri"),
+        ("us", 8, 40, 20, "mon-sat"),
+    ):
+        scheduler.add_job(
+            lambda m=_mkt, d=_days: _run_tracked(
+                lambda on_progress=None: _market_sync_task(m, d, on_progress),
+                f"market_sync_{m}",
+            ),
+            trigger=CronTrigger(day_of_week=_dow, hour=_hour, minute=_minute,
+                                timezone="Asia/Shanghai"),
+            id=f"market_sync_{_mkt}",
+            misfire_grace_time=7200,
+            replace_existing=True,
+        )
 
     # 盘后: 五档盘口 sealed 定版(时间由偏好决定, 默认15:02, 范围15:01~18:00)
     depth_sched = preferences.get_depth_finalize_time()

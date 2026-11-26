@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
 from app.services import strategy_pool
+from app.markets import ALL_MARKETS, get_market
 from app.services.ndjson_heartbeat import with_heartbeat
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import (
@@ -59,6 +60,36 @@ def _get_public_strategy(engine: StrategyEngine, strategy_id: str) -> StrategyDe
     if strategy.meta.get("research_only"):
         raise HTTPException(status_code=404, detail=f"unknown strategy: {strategy_id}")
     return strategy
+
+
+def _validate_market(market: str) -> str:
+    """校验市场标识, 非法返回 400; 合法返回规范化市场名。
+
+    端点被直接调用时 market 可能是 FastAPI 的 Query 默认对象 → 按 A 股口径。
+    """
+    if not isinstance(market, str):
+        return "cn"
+    try:
+        return get_market(market).market
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法市场: {market!r}; 支持: {ALL_MARKETS}",
+        ) from exc
+    return market
+
+
+def _limit_up_gating(strategy: StrategyDef) -> bool:
+    """涨停/连板类策略在港美股不可用(无涨跌停语义) → 需门控。"""
+    tags = str(strategy.meta.get("tags", []) or [])
+    return "涨停" in tags or "连板" in tags
+
+
+def _markets_hint(market: str) -> list[str]:
+    return [
+        "港股/美股无涨跌停语义, 涨停/连板类策略在此市场自动跳过;",
+        "可改用动量/板块/强度类策略(看板总览 / 强度梯队), 数据按 market 隔离存储。",
+    ]
 
 
 def _get_monitor(request: Request) -> StrategyMonitorService:
@@ -257,12 +288,15 @@ class RunRequest(BaseModel):
     params: dict | None = None
     asset_type: str = "stock"
     timeframe: str = "1d"
+    # 市场 (cn|hk|us)。默认 cn(A股), 仅影响印花税口径与策略可运行性(见门控)。
+    market: str = "cn"
 
 
 class RunAllRequest(BaseModel):
     as_of: date | None = None
     asset_type: str = "stock"
     timeframe: str = "1d"
+    market: str = "cn"
 
 
 class SaveConfigRequest(BaseModel):
@@ -335,7 +369,9 @@ def list_strategies(
     asset_type: str | None = None,
     timeframe: str | None = None,
     include_research: bool = False,
+    market: str = "cn",
 ):
+    market = _validate_market(market)
     engine = _get_engine(request)
     data_dir = _data_dir(request)
     all_overrides = strategy_config.list_overrides(data_dir)
@@ -354,7 +390,12 @@ def list_strategies(
         sid = meta["id"]
         s = engine.get(sid)
         overrides = all_overrides.get(sid)
-        result.append({**_strategy_detail(s, overrides, engine), "library": library.get(sid)})
+        result.append({
+            **_strategy_detail(s, overrides, engine),
+            "library": library.get(sid),
+            # 前端据此在港美股置灰涨停/连板类策略；cn 恒 true。
+            "market_supported": market == "cn" or not _limit_up_gating(s.meta),
+        })
     payload: dict = {"strategies": result, "load_errors": engine.load_errors()}
     # 去内置化一次性迁移摘要 (启动时执行过才有): 前端提示一次后本地记忆
     migration = getattr(request.app.state, "legacy_migration", None)
@@ -378,7 +419,19 @@ def get_strategy(strategy_id: str, request: Request):
 @router.post("/run")
 def run_strategy(req: RunRequest, request: Request):
     engine = _get_engine(request)
-    _get_public_strategy(engine, req.strategy_id)
+    strategy = _get_public_strategy(engine, req.strategy_id)
+    market = _validate_market(req.market)
+
+    # 港美股门控: 涨停/连板类策略无涨跌停语义, 自动跳过并给出提示。
+    if market in ("hk", "us") and _limit_up_gating(strategy.meta):
+        return {
+            "market": market,
+            "strategy_id": req.strategy_id,
+            "skipped": True,
+            "reason": f"{market} 市场不支持涨停/连板类策略(无涨跌停语义)",
+            "hints": _markets_hint(market),
+        }
+
     data_dir = _data_dir(request)
 
     # 读取用户覆盖配置
@@ -444,6 +497,19 @@ def run_all(req: RunAllRequest, request: Request):
         and req.asset_type in meta.get("asset_types", ["stock"])
         and req.timeframe in meta.get("timeframes", ["1d"])
     ]
+    market = _validate_market(req.market)
+    gating_ids = [
+        sid for sid, meta in ((m["id"], m) for m in engine.list_strategies())
+        if sid in strategy_ids and _limit_up_gating(meta)
+    ]
+    if market in ("hk", "us") and gating_ids:
+        return {
+            "market": market,
+            "strategy_ids": gating_ids,
+            "skipped": True,
+            "reason": f"{market} 市场不支持涨停/连板类策略(无涨跌停语义)",
+            "hints": _markets_hint(market),
+        }
     from app.services.screener import ScreenerService
     svc = ScreenerService(request.app.state.repo, asset_type=req.asset_type)
     params_map = {

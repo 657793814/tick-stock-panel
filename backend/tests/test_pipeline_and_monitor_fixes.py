@@ -112,6 +112,7 @@ def test_ladder_webhook_uses_chinese_title_without_brand(monkeypatch):
             calls.append((fn, args))
 
     monkeypatch.setattr(quote_service, "_WEBHOOK_EXECUTOR", CaptureExecutor())
+    monkeypatch.setattr("app.services.preferences.get_webhook_enabled_channels", lambda: sorted(preferences.PUSH_CHANNELS))
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "https://open.feishu.cn/open-apis/bot/v2/hook/test")
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "secret")
     monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "wecom-key")
@@ -153,6 +154,7 @@ def test_ladder_dispatches_custom_webhook_and_email(monkeypatch):
         "to_addresses": ["alerts@example.com"],
     }
     monkeypatch.setattr(quote_service, "_WEBHOOK_EXECUTOR", CaptureExecutor())
+    monkeypatch.setattr("app.services.preferences.get_webhook_enabled_channels", lambda: sorted(preferences.PUSH_CHANNELS))
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "")
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "")
     monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "")
@@ -180,6 +182,7 @@ def test_ladder_dispatches_custom_webhook_and_email(monkeypatch):
 
 def test_review_webhooks_use_title_without_brand(monkeypatch):
     calls = []
+    monkeypatch.setattr("app.services.preferences.get_webhook_enabled_channels", lambda: sorted(preferences.PUSH_CHANNELS))
     monkeypatch.setattr("app.services.preferences.get_review_push_channels", lambda: ["feishu", "wecom"])
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "feishu-url")
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "secret")
@@ -207,6 +210,7 @@ def test_review_pushes_custom_webhook_and_email(monkeypatch):
         "from_address": "bot@example.com",
         "to_addresses": ["alerts@example.com"],
     }
+    monkeypatch.setattr("app.services.preferences.get_webhook_enabled_channels", lambda: sorted(preferences.PUSH_CHANNELS))
     monkeypatch.setattr("app.services.preferences.get_review_push_channels", lambda: ["custom", "email"])
     monkeypatch.setattr("app.services.preferences.get_custom_webhook_url", lambda: "https://example.com/hook")
     monkeypatch.setattr("app.services.preferences.get_email_smtp_config", lambda: email_config)

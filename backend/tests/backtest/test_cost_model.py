@@ -82,6 +82,27 @@ def test_commission_pct_zero_is_not_treated_as_unset():
     assert cfg.sell_cost_pct() == 0.0
 
 
+def test_cn_market_keeps_custom_stamp_only_on_sell():
+    """显式 market=cn 不应改变 A 股历史口径: 印花税仍只落在卖出腿。"""
+    cfg = MatcherConfig(commission_pct=0.0003, stamp_tax_pct=0.001, slippage_bps=0, market="cn")
+    assert cfg.buy_cost_pct() == 0.0003
+    assert cfg.sell_cost_pct() == 0.0003 + 0.001
+
+
+def test_hk_market_charges_stamp_on_both_legs():
+    """港股双边印花税: 买卖各 0.1%, 覆盖策略自定义值。"""
+    cfg = MatcherConfig(commission_pct=0.0003, stamp_tax_pct=0.0, slippage_bps=0, market="hk")
+    assert cfg.buy_cost_pct() == 0.0003 + 0.001
+    assert cfg.sell_cost_pct() == 0.0003 + 0.001
+
+
+def test_us_market_has_no_stamp_tax():
+    """美股无印花税, 买卖成本只含佣金与滑点。"""
+    cfg = MatcherConfig(commission_pct=0.0003, stamp_tax_pct=0.001, slippage_bps=0, market="us")
+    assert cfg.buy_cost_pct() == 0.0003
+    assert cfg.sell_cost_pct() == 0.0003
+
+
 # ---------------------------------------------------------------
 # 2. 撮合传导: 印花税只影响卖出腿
 # ---------------------------------------------------------------

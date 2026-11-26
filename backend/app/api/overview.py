@@ -10,8 +10,9 @@ from datetime import date
 from typing import Any
 
 import polars as pl
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from app import cache_store
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.index_const import CORE_INDEX_NAMES, CORE_INDEX_SYMBOLS
 from app.services.screener import ScreenerService
@@ -19,27 +20,28 @@ from app.services.screener import ScreenerService
 router = APIRouter(prefix="/api/overview", tags=["overview"])
 
 _CACHE_TTL = 5.0
-_cache: dict[str, Any] | None = None
-_cache_key: str | None = None
-_cache_ts: float = 0.0
+# 港美股单日指标慢路径要几十秒, 本地内存缓存只活 5 秒没有意义; 用 Redis/内存
+# 缓存 5 分钟, 数据刷新时仍由 invalidate_overview_cache 主动清掉。
+_MARKET_CACHE_TTL = 300.0
 # 缓存跨线程读写锁: market_overview 在 FastAPI 线程池读, invalidate 在数据刷新线程清,
 # 无锁会读到撕裂/过期状态。用模块级 Lock 守护 check-then-set 与 clear。
 _cache_lock = threading.Lock()
-_cache_generation = 0
-_inflight: dict[tuple[int, str], Future] = {}
+# 行情推送只影响 A 股聚合, 用按市场 generation 避免把港美股几十秒算出的缓存
+# 一起清掉。数据刷新等全量变更仍可传 markets=None 清全部市场。
+_cache_generations: dict[str, int] = {"cn": 0, "hk": 0, "us": 0}
+_inflight: dict[tuple[str, int, str], Future] = {}
 
 
-def invalidate_overview_cache() -> None:
-    """清空总览聚合结果缓存。
+def invalidate_overview_cache(markets: list[str] | None = None) -> None:
+    """清空总览聚合结果缓存(Redis + 进程内内存)。
 
     清除数据后调用, 避免看板在 TTL 窗口内继续返回旧的聚合结果。
     """
-    global _cache, _cache_key, _cache_ts, _cache_generation
+    targets = list(_cache_generations) if markets is None else [m for m in markets if m in _cache_generations]
     with _cache_lock:
-        _cache = None
-        _cache_key = None
-        _cache_ts = 0.0
-        _cache_generation += 1
+        for market in targets:
+            cache_store.invalidate_namespace("overview", key_prefix=f"{market}:")
+            _cache_generations[market] += 1
 
 
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
@@ -364,17 +366,50 @@ def _build_overview(request: Request, as_of: date | None = None) -> dict:
 
 
 @router.get("/market")
-def market_overview(request: Request, as_of: date | None = None):
-    """总览页单次请求聚合数据，避免前端拉全市场明细后再计算。"""
-    global _cache, _cache_key, _cache_ts
+def market_overview(
+    request: Request,
+    as_of: date | None = None,
+    market: str = Query("cn", description="cn|hk|us，默认 cn"),
+):
+    """总览页单次请求聚合数据，避免前端拉全市场明细后再计算。
+
+    港美股走 build_market_overview_market（60日新高/新低替代涨跌停，
+    无概念/行业/成交额），A 股保持原逻辑。缓存键含 market 维度。
+    """
+    from app.markets import get_market
+
+    # 直接以函数方式调用（单测/内部复用）时 FastAPI 不解析 Query 默认值，
+    # market 会是 Query 对象 —— 归一为默认 cn，避免字符串化泄漏内部元数据。
+    if not isinstance(market, str):
+        market = "cn"
+    try:
+        market_meta = get_market(market)
+    except ValueError:
+        # 不要在此处局部 import HTTPException: 它会让该名字在整个函数内变成局部变量,
+        # 后续预热 503 分支先于赋值引用 → UnboundLocalError → 港美股总览 500。
+        raise HTTPException(status_code=400, detail=f"非法市场: {market}(可选 cn/hk/us)")
+    # 缓存键带 generation: 数据刷新后旧键即使还在 Redis 里也不会被读到。
     now = time.monotonic()
-    cache_key = as_of.isoformat() if as_of else "latest"
-    # 读缓存持锁, 避免与 invalidate 的 clear 竞态读到撕裂状态
     with _cache_lock:
-        if _cache is not None and _cache_key == cache_key and (now - _cache_ts) < _CACHE_TTL:
-            return _cache
-        generation = _cache_generation
-        flight_key = (generation, cache_key)
+        generation = _cache_generations[market]
+        as_of_key = as_of.isoformat() if as_of else "latest"
+        cache_key = f"{market}:{generation}:{as_of_key}"
+        cached = cache_store.get_json("overview", cache_key, now=now)
+        if cached is not None:
+            return cached
+        # 预热中不接全量重算: 冷启动的 compute window 本身就要 2.5~3GiB,
+        # 再叠加一次看板聚合会直接触发容器 OOM (3.83GiB 上限)。
+        # 返回 503 让前端保持骨架屏并退避重试, 预热完成后自然恢复。
+        # request 为 None 时 (测试直调) 跳过该检查。
+        if request is not None:
+            repo = getattr(request.app.state, "repo", None)
+            if repo is not None and getattr(repo, "enriched_warming", False):
+                raise HTTPException(
+                    status_code=503,
+                    detail="行情数据预热中，请稍候",
+                    headers={"Retry-After": "3"},
+                )
+        flight_key = (market, generation, as_of_key)
         flight = _inflight.get(flight_key)
         leader = flight is None
         if leader:
@@ -384,7 +419,11 @@ def market_overview(request: Request, as_of: date | None = None):
         return flight.result()
     # Both computation and follower waits stay outside the cache lock.
     try:
-        data = _build_overview(request, as_of)
+        if market_meta.market != "cn":
+            from app.services.market_overview_builder import build_market_overview_market
+            data = build_market_overview_market(request.app.state.repo, market, as_of)
+        else:
+            data = _build_overview(request, as_of)
     except BaseException as exc:
         with _cache_lock:
             _inflight.pop(flight_key, None)
@@ -392,10 +431,9 @@ def market_overview(request: Request, as_of: date | None = None):
         raise
     with _cache_lock:
         # A refresh may have invalidated this build while it was running.
-        if generation == _cache_generation:
-            _cache = data
-            _cache_key = cache_key
-            _cache_ts = now
+        if generation == _cache_generations[market]:
+            ttl = _MARKET_CACHE_TTL if market_meta.market != "cn" else _CACHE_TTL
+            cache_store.set_json("overview", cache_key, data, ttl, now=now)
         _inflight.pop(flight_key, None)
     flight.set_result(data)
     return data

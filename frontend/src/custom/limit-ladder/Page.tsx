@@ -17,6 +17,7 @@ import { useTheme } from '@/lib/theme'
 import { useCapabilities, usePreferences } from '@/lib/useSharedQueries'
 import { SealedBadge } from '@/components/SealedBadge'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
+import { useMarket, marketLabel, type Market } from '@/lib/market'
 import type { ExtColumnDisplayConfig } from '@/lib/watchlist-columns'
 
 // ===== Ext 字段配置 =====
@@ -415,7 +416,7 @@ function MonitorMenu({ stock, direction, sealMode, monitorRule, anchorRect, hasD
 
   // 推送渠道默认值: 取偏好设置中的全局默认 (已有规则沿用其值)
   const { data: prefs } = usePreferences()
-  const webhookDefaultChannels = prefs?.webhook_default_channels ?? []
+  const webhookDefaultChannels = prefs?.webhook_enabled_channels ?? prefs?.webhook_default_channels ?? []
   const backdrop = useDialogBackdrop(onClose)
 
   // 单位倍率: 输入值 × 倍率 = 原始单位 (量=手, 额=元)
@@ -770,20 +771,22 @@ function tierTextCls(n: number): string {
   return 'text-muted'
 }
 
-function tierLabel(n: number, direction: Direction): string {
+function tierLabel(n: number, direction: Direction, market: Market = 'cn'): string {
+  if (market !== 'cn') return `${n}档`
   if (direction === 'down') return n === 1 ? '首跌' : `${n}连跌`
   return n === 1 ? '首板' : `${n}板`
 }
 
 // ===== 梯队总览条 =====
 
-function OverviewBar({ tiers, dateValue, onDateChange, filterKeys, bf, direction }: {
+function OverviewBar({ tiers, dateValue, onDateChange, filterKeys, bf, direction, market }: {
   tiers: LimitLadderTier[]
   dateValue: string
   onDateChange: (v: string) => void
   filterKeys: Set<FilterKey>
   bf?: BrokenFailedConfig
   direction: Direction
+  market: Market
 }) {
   if (tiers.length === 0) return null
   const cfg = { ...DEFAULT_BF, ...bf }
@@ -810,7 +813,7 @@ function OverviewBar({ tiers, dateValue, onDateChange, filterKeys, bf, direction
           const luCount = limitUpCounts[idx]
           return (
             <div key={t.boards} className="flex items-center gap-1">
-              <span className={`font-medium ${tierTextCls(t.boards)}`}>{tierLabel(t.boards, direction)}</span>
+              <span className={`font-medium ${tierTextCls(t.boards)}`}>{tierLabel(t.boards, direction, market)}</span>
               <div
                 className="h-2 rounded-sm bg-accent/40"
                 style={{ width: `${Math.max(8, (luCount / maxCount) * 48)}px` }}
@@ -984,7 +987,7 @@ function sortLadderStocks(
     })
 }
 
-function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick, selectedTag, onSelectTag, onDimensionClick, direction, sealMode, monitoredSymbols, ladderRules, onMonitorChange, hasDepth, activeSymbol }: {
+function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick, selectedTag, onSelectTag, onDimensionClick, direction, sealMode, monitoredSymbols, ladderRules, onMonitorChange, hasDepth, activeSymbol, market }: {
   tier: LimitLadderTier
   defaultOpen: boolean
   extFields: ExtFieldConfig
@@ -1002,6 +1005,7 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
   hasDepth: boolean
   /** 正在 K 线弹窗预览中 → 高亮对应卡片 */
   activeSymbol?: string | null
+  market: Market
 }) {
   const isDarkTheme = useTheme() === 'dark'
   const [open, setOpen] = useState(defaultOpen)
@@ -1056,7 +1060,7 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
         className="w-full flex items-center gap-2 px-3 py-2 hover:bg-surface/80 transition-colors"
       >
         <Flame className={`h-3.5 w-3.5 ${tier.boards >= 5 ? 'text-orange-500' : tier.boards >= 3 ? 'text-yellow-500' : 'text-muted'}`} />
-        <span className={`text-sm font-bold tabular-nums ${tierTextCls(tier.boards)}`}>{tierLabel(tier.boards, direction)}<span className="text-muted/40 mx-1">·</span>{luCount}</span>
+        <span className={`text-sm font-bold tabular-nums ${tierTextCls(tier.boards)}`}>{tierLabel(tier.boards, direction, market)}<span className="text-muted/40 mx-1">·</span>{luCount}</span>
         {(showBroken && brCount > 0) || (showFailed && faCount > 0) ? (
           <span className="text-[11px] text-muted/60">
             {showBroken && brCount > 0 && <span className="text-purple-400">{brCount}{brokenBadge}</span>}
@@ -1462,6 +1466,7 @@ function ExtConfigDialog({ fields, onSave, onClose }: {
 // ===== 主页面 =====
 
 export function LimitUpLadder() {
+  const { market } = useMarket()
   const [asOf, setAsOf] = useState('')
   const [direction, setDirection] = useState<Direction>(() => storage.limitLadderDirection.get('up'))
   const [sealMode, setSealMode] = useState<'vol' | 'amount'>(() => storage.limitLadderSealMode.get('vol'))
@@ -1546,13 +1551,13 @@ export function LimitUpLadder() {
     // key 必须拍平 (spread 展开): key[0] 为字符串 'limit-ladder' 才能被 SSE 前缀失效
     // 命中实现实时刷新, depth_updated 事件 (invalidate ['limit-ladder']) 也才能匹配本查询。
     // 嵌套数组 key 会导致前者靠 String() 侥幸命中、后者永远失配。
-    queryKey: [...QK.limitLadder(asOf || undefined), extColumnsParam, direction],
-    queryFn: () => api.limitLadder(asOf || undefined, extColumnsParam, direction),
+    queryKey: [...QK.limitLadder(asOf || undefined, market), extColumnsParam, direction],
+    queryFn: () => api.limitLadder(asOf || undefined, extColumnsParam, direction, market),
     staleTime: 5 * 60_000,
     // 改扩展列重取期间沿用上一份「同日期同方向」数据不闪空; 涨跌切换不透传反向梯队
     placeholderData: (prev: any, prevQuery: any) => {
       const prevKey = prevQuery?.queryKey as readonly unknown[] | undefined
-      return prevKey?.[1] === (asOf || undefined) && prevKey?.[3] === direction ? prev : undefined
+      return prevKey?.[1] === market && prevKey?.[2] === (asOf || undefined) && prevKey?.[4] === direction ? prev : undefined
     },
   })
   const handleOpenDimension = useCallback((kind: DimensionKind, value: string, sourceField?: string) => {
@@ -1604,12 +1609,17 @@ export function LimitUpLadder() {
   }
 
   const dateValue = displayDate || new Date().toISOString().slice(0, 10)
+  const ladderTitle = market === 'cn'
+    ? (direction === 'down' ? '连跌梯队' : '连板梯队')
+    : '强度梯队'
+  const upLabel = market === 'cn' ? '涨停' : '新高'
+  const downLabel = market === 'cn' ? '跌停' : '新低'
 
   // 请求失败与空数据分开呈现: 失败显示错误态 + 重试, 而非误导性的「暂无连板数据」
   if (isError) {
     return (
       <div className="flex flex-col h-full">
-        <PageHeader title={direction === 'down' ? '连跌梯队' : '连板梯队'} />
+        <PageHeader title={ladderTitle} />
         <ErrorState
           title={direction === 'down' ? '连跌数据加载失败' : '连板数据加载失败'}
           hint="行情接口暂时不可用，请重试；多次失败可检查数据源配置与网络"
@@ -1623,7 +1633,7 @@ export function LimitUpLadder() {
   if (!data || rawTiers.length === 0) {
     return (
       <div className="flex flex-col h-full">
-        <PageHeader title={direction === 'down' ? '连跌梯队' : '连板梯队'} />
+        <PageHeader title={ladderTitle} />
         <EmptyState icon={Flame} title={direction === 'down' ? '暂无连跌数据' : '暂无连板数据'} hint={direction === 'down' ? '该日期无跌停股或 enriched 数据未就绪' : '该日期无涨停股或 enriched 数据未就绪'} />
       </div>
     )
@@ -1632,20 +1642,24 @@ export function LimitUpLadder() {
   return (
     <div className="flex flex-col h-full">
       <PageHeader
-        title={direction === 'down' ? '连跌梯队' : '连板梯队'}
+        title={ladderTitle}
         titleExtra={
           <div className="flex items-center gap-2">
-            <SealedBadge
-              degraded={sealedDegrade.degraded}
-              hasDepth={sealedDegrade.hasDepth}
-              isHistorical={sealedDegrade.isHistorical}
-              sealedReady={sealedDegrade.sealedReady}
-              sealedCountsUp={data?.sealed_counts_up}
-              sealedCountsDown={data?.sealed_counts_down}
-              rawUp={data?.counts_raw?.up}
-              rawDown={data?.counts_raw?.down}
-            />
-            {/* 涨跌停切换(胶囊式): 点击切换方向, 当前方向有背景 */}
+            {market === 'cn' ? (
+              <SealedBadge
+                degraded={sealedDegrade.degraded}
+                hasDepth={sealedDegrade.hasDepth}
+                isHistorical={sealedDegrade.isHistorical}
+                sealedReady={sealedDegrade.sealedReady}
+                sealedCountsUp={data?.sealed_counts_up}
+                sealedCountsDown={data?.sealed_counts_down}
+                rawUp={data?.counts_raw?.up}
+                rawDown={data?.counts_raw?.down}
+              />
+            ) : (
+              <span className="rounded-full border border-border bg-elevated px-2 py-0.5 text-[10px] text-secondary">{marketLabel(market)}强度榜</span>
+            )}
+            {/* 涨跌停/新高新低切换(胶囊式): 点击切换方向, 当前方向有背景 */}
             <div className="flex items-center rounded-full bg-elevated/60 p-0.5">
               <button
                 onClick={() => direction !== 'up' && toggleDirection('up')}
@@ -1655,7 +1669,7 @@ export function LimitUpLadder() {
                     : 'text-muted hover:text-bull/70'
                 }`}
               >
-                <span>涨停</span>
+                <span>{upLabel}</span>
                 <span>{data?.counts?.up ?? 0}</span>
               </button>
               <button
@@ -1666,7 +1680,7 @@ export function LimitUpLadder() {
                     : 'text-muted hover:text-bear/70'
                 }`}
               >
-                <span>跌停</span>
+                <span>{downLabel}</span>
                 <span>{data?.counts?.down ?? 0}</span>
               </button>
             </div>
@@ -1675,7 +1689,7 @@ export function LimitUpLadder() {
         right={
           <div className="flex items-center gap-1">
             {/* 封单模式: 成交量/金额(仅 sealed 就绪时显示) — 胶囊式 */}
-            {data?.sealed_ready && (
+            {market === 'cn' && data?.sealed_ready && (
               <>
                 <div className="flex items-center rounded-full bg-elevated/60 p-0.5">
                   {(['vol', 'amount'] as const).map(m => (
@@ -1775,7 +1789,7 @@ export function LimitUpLadder() {
       />
 
       {/* 总览条 + 日期 */}
-      <OverviewBar tiers={tiers} dateValue={dateValue} onDateChange={setAsOf} filterKeys={filterKeys} bf={extFields.bf} direction={direction} />
+      <OverviewBar tiers={tiers} dateValue={dateValue} onDateChange={setAsOf} filterKeys={filterKeys} bf={extFields.bf} direction={direction} market={market} />
 
       {/* 概念统计 */}
       {(extFields.showConceptStats ?? true) && (
@@ -1827,6 +1841,7 @@ export function LimitUpLadder() {
             onMonitorChange={refetchMonitorRules}
             hasDepth={sealedDegrade.hasDepth}
             activeSymbol={previewSymbol}
+            market={market}
           />
         ))}
       </div>

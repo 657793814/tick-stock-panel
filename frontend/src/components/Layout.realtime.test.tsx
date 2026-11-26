@@ -40,7 +40,6 @@ vi.mock('@/lib/useSharedQueries', async importOriginal => ({
 vi.mock('@/lib/useQuoteStream', () => ({
   useQuoteStream: () => {}, useQuoteStreamStatus: () => 'connected',
 }))
-vi.mock('@/lib/updateCheck', () => ({ useUpdateCheck: () => ({ status: 'latest' }) }))
 vi.mock('@/lib/useMediaQuery', () => ({ useIsDesktop: () => layoutMocks.desktop }))
 vi.mock('@/extensions/registry', () => ({ getFrontendExtensionNavigation: () => [] }))
 vi.mock('@/extensions/ExtensionSlot', () => ({ ExtensionSlot: () => null }))

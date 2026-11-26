@@ -58,6 +58,8 @@ class FactorConfig:
     asset_type: str = "stock"
     commission_pct: float | None = None
     stamp_tax_pct: float | None = None
+    # 市场 (cn|hk|us)。显式给定后印花税按 app.markets.stamp_tax_for 覆盖策略自定义值。
+    market: str | None = None
 
 
 @dataclass
@@ -116,6 +118,8 @@ class FactorBatchConfig:
     asset_type: str = "stock"
     commission_pct: float | None = None
     stamp_tax_pct: float | None = None
+    # 市场 (cn|hk|us)。显式给定后印花税按 app.markets.stamp_tax_for 覆盖策略自定义值。
+    market: str | None = None
 
 
 @dataclass
@@ -1082,7 +1086,11 @@ class FactorBacktestService:
             if config.commission_pct is not None
             else config.fees_pct
         )
-        stamp_tax = config.stamp_tax_pct or 0.0
+        # 显式市场: 按 app.markets.stamp_tax_for 该市场单边印花税覆盖策略自定义值。
+        stamp_tax = config.stamp_tax_pct if config.stamp_tax_pct is not None else 0.0
+        if config.market is not None:
+            from app.markets import stamp_tax_for
+            stamp_tax = stamp_tax_for(config.market)
         slippage = config.slippage_bps / 10_000.0
         return 2.0 * commission + stamp_tax + 2.0 * slippage
 

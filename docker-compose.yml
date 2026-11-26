@@ -1,4 +1,4 @@
-# Phase 0 单 service:FastAPI 启动后既跑 API 又托管前端 dist。
+# Phase 0:FastAPI 启动后既跑 API 又托管前端 dist; Redis 只做缓存基础设施。
 # 见 ADR-17 / §8.1。
 services:
   app:
@@ -21,10 +21,23 @@ services:
       # 导致每次 up --build 重建容器都丢数据。environment 优先级高于 env_file,
       # 无论 .env 怎么写这里都以容器路径为准。
       - DATA_DIR=/app/data
+      # 启动期 enriched 预热会一次性计算 ~109 万行宽表; 按 CPU 核数并行会把
+      # Docker VM 内存顶到 3.2GiB+ 并触发 OOM kill。限 2 线程是 README 已实测
+      # 的降峰值配置(约省 500MB), 预热慢一些但不再把看板请求一起拖崩。
+      - POLARS_MAX_THREADS=${POLARS_MAX_THREADS:-2}
+      # Redis 只承接可 JSON 化的昂贵缓存(如港美股总览)。设 REDIS_ENABLED=0
+      # 或 Redis 容器未启动时, 后端自动退回进程内内存缓存, 不影响启动。
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - REDIS_ENABLED=${REDIS_ENABLED:-1}
       # 将主机 Codex Desktop 的 loopback local-access 端点映射到 Docker host gateway。
       - CODEX_DOCKER_HOST=host.docker.internal
     volumes:
       - ./data:/app/data
+      # 源码以挂载方式提供: Python 是解释型, 改 .py / 重新 pnpm build 后只需
+      # `docker compose restart`(不必 `--build` 重做镜像)。镜像里仍烤有一份代码
+      # 作为兜底, 挂载覆盖它; 首次使用需保证宿主机 frontend/dist 已构建。
+      - ./backend/app:/app/app:ro
+      - ./frontend/dist:/app/static:ro
       - ./tiers.yaml:/app/tiers.yaml:ro
       # 保留原始 dotenv 值供首次密码初始化读取，避免 Compose 展开密码中的 $VAR。
       - ./.env:/app/.env:ro
@@ -32,3 +45,15 @@ services:
       # Windows PowerShell/CMD 下 HOME 常未设置, 可通过 .env 里 CODEX_HOME_HOST 覆盖。
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
     restart: unless-stopped
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: TickFlow_Redis
+    # 纯缓存, 不落盘; 限制内存后由 LRU 淘汰, 避免和后端争抢 Docker VM 内存。
+    command: redis-server --save "" --appendonly no --maxmemory ${REDIS_MAXMEMORY:-192mb} --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3

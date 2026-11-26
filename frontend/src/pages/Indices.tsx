@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Loader2, Lock, RefreshCw } from 'lucide-react'
-import { api, type IndexInstrument, type KlineRow, type MinuteKlineRow } from '@/lib/api'
+import { api, type IndexInstrument, type IndexInstrumentMarket, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useCapabilities } from '@/lib/useSharedQueries'
+import { useMarket } from '@/lib/market'
+import { marketLabel } from '@/lib/market'
 import type { OHLC } from '@/lib/chart-types'
 import { LightweightDaily } from '@/components/charts/LightweightDaily'
 import { LightweightIntraday } from '@/components/charts/LightweightIntraday'
@@ -62,6 +64,8 @@ const PINNED_INDEXES = [
   { symbol: '000680.SH', name: '科创综指' },
 ]
 
+// 港美股指数列表由全局市场切换时经 /api/indices/market 拉取（按 markets 注册表定义）
+
 export function Indices() {
   const qc = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -74,13 +78,31 @@ export function Indices() {
   // 分时数据依赖分钟K批量数据 (kline.minute.batch)
   const caps = useCapabilities()
   const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
+  const { market, setMarket } = useMarket()
+  // 全局市场切换 → 指数视图按市场选择标的列表（cn 走 A 股固定核心指数）
+  const [scope, setScope] = useState<'cn' | 'hk' | 'us'>(market)
+  useEffect(() => { setScope(market) }, [market])
+  const scopeList = useQuery({
+    queryKey: QK.marketIndexScope(scope === 'cn' ? '' : scope),
+    queryFn: scope === 'cn' ? () => api.marketIndexList('hk') : () => api.marketIndexList(scope),
+    enabled: scope !== 'cn',
+    placeholderData: (prev) => prev,
+  })
 
   // 指数标的固定核心四只 (产品契约, 不再提供全指数搜索/浏览)
   const topRows: IndexInstrument[] = PINNED_INDEXES.map(p => ({
     symbol: p.symbol, name: p.name, asset_type: 'index' as const,
   }))
 
-  const selectedSymbol = selected || topRows[0]?.symbol || ''
+  // 非 A 股市场: 默认选中该市场首个指数
+  useEffect(() => {
+    if (scope !== 'cn' && scopeList.data?.items?.length) {
+      const first = scopeList.data.items[0]
+      if (!selected || !scopeList.data.items.some(i => i.symbol === selected)) setSelected(first.symbol)
+    }
+  }, [scope, scopeList.data, selected])
+
+  const selectedSymbol = selected || (scope !== 'cn' ? scopeList.data?.items[0]?.symbol : topRows[0]?.symbol) || ''
 
   useEffect(() => {
     if (symbolParam && symbolParam !== selected) setSelected(symbolParam)
@@ -91,18 +113,32 @@ export function Indices() {
     setSearchParams({ symbol })
   }
 
-  const quotes = useQuery({
-    queryKey: QK.indexQuotes,
-    queryFn: () => api.indexQuotes(),
-    placeholderData: (prev) => prev,
-  })
+  // 指数行情: cn 走 A 股接口, 港美股走 /api/indices/market（按市场路由）
+  const quotes = scope === 'cn' ? (
+    useQuery({ queryKey: QK.indexQuotes, queryFn: () => api.indexQuotes(), placeholderData: (prev) => prev })
+  ) : (
+    useQuery({
+      queryKey: ['market-index-quotes', scope],
+      queryFn: () => api.marketIndexQuotes(scope),
+      placeholderData: (prev) => prev,
+    })
+  )
 
-  const daily = useQuery({
-    queryKey: QK.indexDaily(selectedSymbol, range.start, range.end),
-    queryFn: () => api.indexDaily(selectedSymbol, 180, range),
-    enabled: !!selectedSymbol,
-    placeholderData: (prev) => prev,
-  })
+  const daily = scope === 'cn' ? (
+    useQuery({
+      queryKey: QK.indexDaily(selectedSymbol, range.start, range.end),
+      queryFn: () => api.indexDaily(selectedSymbol, 180, range),
+      enabled: !!selectedSymbol,
+      placeholderData: (prev) => prev,
+    })
+  ) : (
+    useQuery({
+      queryKey: ['market-index-daily', scope, selectedSymbol],
+      queryFn: () => api.marketIndexDaily(scope, selectedSymbol, 180, range),
+      enabled: !!selectedSymbol,
+      placeholderData: (prev) => prev,
+    })
+  )
 
   const minute = useQuery({
     queryKey: QK.indexMinute(selectedSymbol, selectedDate ?? ''),
@@ -128,7 +164,14 @@ export function Indices() {
   const selectedQuotePct = selectedQuote?.change_pct ?? selectedQuote?.pct
 
   const chartRows = useMemo(() => toOHLC(daily.data?.rows ?? []), [daily.data?.rows])
-  const selectedInfo = topRows.find(r => r.symbol === selectedSymbol) || daily.data?.index_info
+  // 当前指数列表: cn 用 A 股固定核心; 港美股用全局市场的市场指数（数据按市场路由）
+  const indexItems = useMemo(
+    () => (scope === 'cn' ? topRows : scopeList.data?.items ?? []),
+    [scope, scopeList.data, topRows],
+  )
+  const selectedInfo = topRows.find(r => r.symbol === selectedSymbol)
+    || (scope === 'cn' ? null : scopeList.data?.items?.find(i => i.symbol === selectedSymbol))
+    || daily.data?.index_info
   const minuteRows: MinuteKlineRow[] = minute.data?.symbol === selectedSymbol
     && minute.data?.date === selectedDate && daily.data?.symbol === selectedSymbol
     ? minute.data.rows : []
@@ -149,7 +192,7 @@ export function Indices() {
       setSelectedDate(chartRows[chartRows.length - 1].date)
     }
   }, [chartRows, daily.data?.symbol, selectedDate, selectedSymbol])
-  const renderIndexItem = (item: IndexInstrument) => {
+  const renderIndexItem = (item: IndexInstrument | IndexInstrumentMarket) => {
     const q = quoteBySymbol.get(item.symbol)
     const pct = q?.change_pct ?? q?.pct
     const current = q?.last_price ?? q?.price ?? q?.close
@@ -182,6 +225,20 @@ export function Indices() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* 市场切换: 切换后指数视图按市场路由（cn=A股固定核心指数 / hk=港股 / us=美股） */}
+          <div className="flex items-center gap-0.5 rounded-btn border border-border bg-base p-0.5">
+            {(['cn', 'hk', 'us'] as const).map(m => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => { setMarket(m); setScope(m) }}
+                aria-pressed={scope === m}
+                className={`h-6 px-2 text-[10px] font-medium transition-colors ${scope === m ? 'bg-accent text-white' : 'text-secondary hover:bg-elevated'}`}
+              >
+                {m === 'cn' ? 'A股' : marketLabel(scope === 'hk' ? 'hk' : 'us')}
+              </button>
+            ))}
+          </div>
           <button
             onClick={() => syncDaily.mutate()}
             disabled={syncDaily.isPending}
@@ -195,9 +252,11 @@ export function Indices() {
 
       <div className="grid grid-cols-[15rem_1fr] gap-4">
         <aside className="rounded-card border border-border bg-surface p-3">
-          <div className="mb-2 px-1 text-[11px] uppercase tracking-wider text-muted">核心指数</div>
+          <div className="mb-2 px-1 text-[11px] uppercase tracking-wider text-muted">
+            {scope === 'cn' ? 'A股核心指数' : `${scope} 市场指数`}
+          </div>
           <div className="space-y-1">
-            {topRows.map(renderIndexItem)}
+            {indexItems.map(renderIndexItem)}
           </div>
         </aside>
 
@@ -214,7 +273,9 @@ export function Indices() {
                 {selectedSymbol && <span className={`font-mono text-xs ${Number(selectedQuotePct ?? 0) >= 0 ? 'text-bull' : 'text-bear'}`}>{fmtPct(selectedQuotePct)}</span>}
               </div>
               <div className="mt-1 text-xs text-muted">
-                实时缓存 {quotes.data?.count ?? 0} 只指数 · 日K来源 {daily.data?.source ?? '--'}
+                 {scope === 'cn'
+                   ? `A股接口 · 已缓存 ${quotes.data?.count ?? 0} 只指数 · 日K ${daily.data?.rows?.length ?? 0} 根`
+                   : `港${scope === 'hk' ? '港股' : '美股'}接口 · 已缓存 ${quotes.data?.count ?? 0} 只指数 · 日K ${daily.data?.rows?.length ?? 0} 根`}
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs">

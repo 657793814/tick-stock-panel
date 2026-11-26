@@ -28,6 +28,8 @@ const PERSISTABLE_KEY_ROOTS = new Set([
   'regime-mainline',
   'custom-signals',           // 自定义信号库
   'custom-signals-options',
+  // 港美股 4 大指数日线收盘 (慢变): 重开应用先显示上次指数，避免顶部长时间空白
+  'market-index-quotes',
 ])
 
 function isPersistableQueryKey(key: readonly unknown[]): boolean {

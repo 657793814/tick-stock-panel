@@ -172,6 +172,43 @@ def test_minute_summaries_only_exports_1m_handles():
     assert mgr.minute_summaries() == []
 
 
+def test_parse_key_supports_market_and_legacy_shapes():
+    market_key = ("hk", ("ident",), "stock", "1m", "2026-03-02", ("m1",))
+    parts = q.parse_key(market_key)
+    assert parts == {"market": "hk", "identity": ("ident",), "asset_type": "stock",
+                     "timeframe": "1m", "as_of": "2026-03-02"}
+
+    legacy_key = ("stock", "1d", "2026-03-02", ("s1",), ("ident",))
+    legacy = q.parse_key(legacy_key)
+    assert legacy["market"] == "cn"
+    assert legacy["timeframe"] == "1d"
+    assert legacy["as_of"] == "2026-03-02"
+    assert legacy["identity"] == ("ident",)
+
+
+def test_minute_summaries_isolated_by_market():
+    """港股分钟 result 不能合进 A 股 cached-summary。"""
+    mgr = q.StrategyRunManager()
+    key_cn = ("cn", ("cn-ident",), "stock", "1m", "2026-03-02", ("m1",))
+    key_hk = ("hk", ("hk-ident",), "stock", "1m", "2026-03-02", ("m1",))
+
+    def job(handle):
+        handle.complete("m1", {"total": 3, "as_of": "2026-03-02", "computed_at": 1})
+
+    h_cn = mgr.get_or_submit(key_cn, ["m1"], job)
+    _wait_done(h_cn, timeout=10)
+    h_hk = mgr.get_or_submit(key_hk, ["m1"], job)
+    _wait_done(h_hk, timeout=10)
+
+    only_cn = mgr.minute_summaries(identity=("cn-ident",), asset_type="stock", market="cn")
+    assert len(only_cn) == 1
+    assert only_cn[0]["as_of"] == "2026-03-02"
+
+    only_hk = mgr.minute_summaries(market="hk")
+    assert len(only_hk) == 1
+    assert only_hk[0]["as_of"] == "2026-03-02"
+
+
 def test_running_duplicate_still_rides_same_handle():
     """执行中的重复请求仍搭车同一 handle (回归: 暂存区不能破坏搭车)。"""
     mgr = q.StrategyRunManager()

@@ -131,6 +131,50 @@ def test_sync_merges_into_existing_daily_partition(monkeypatch, repo):
     assert set(stored["symbol"].to_list()) == {"000001.SZ", "000002.SZ"}
 
 
+def test_sync_merges_existing_partition_with_integer_volume(monkeypatch, repo):
+    """实时快照用整型 volume 覆写当天分区后, 傍晚日K合并不得整段 SchemaError。
+
+    存储契约声明 volume 为 Float64; 整型写入方会让按 schema 扫描的分区合并
+    直接抛 "incoming Int64 != target Float64", 整个 sync_daily 阶段失败。
+    """
+    target = repo.store.data_dir / "kline_daily" / "date=2020-01-02"
+    target.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"], "date": [date(2020, 1, 2)], "open": [10.0],
+        "high": [11.0], "low": [9.0], "close": [9.0], "volume": [100],
+        "amount": [1050.0], "quote_ts": [1577948400000],
+    }).with_columns(
+        pl.col("volume").cast(pl.Int64), pl.col("quote_ts").cast(pl.Int64),
+    ).write_parquet(target / "part.parquet")
+    provider = _StreamingProvider([_daily("000002.SZ", date(2020, 1, 2))])
+    _route_fuyao(monkeypatch, provider)
+
+    written = kline_sync.sync_and_persist_daily_batch(
+        ["000002.SZ"], repo, object(),
+        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+    )
+
+    assert written == 1
+    stored = pl.read_parquet(target / "part.parquet")
+    assert set(stored["symbol"].to_list()) == {"000001.SZ", "000002.SZ"}
+    # 合并后统一回存储契约类型, 后续按 schema 扫描不再失败
+    assert stored.schema["volume"] == pl.Float64
+
+
+def test_live_flush_writes_canonical_daily_dtypes(repo):
+    """实时快照落盘必须按存储契约归一量价类型 (整型 volume → Float64)。"""
+    repo.flush_live_daily(pl.DataFrame({
+        "symbol": ["000001.SZ"], "date": [date(2020, 1, 2)], "open": [10.0],
+        "high": [11.0], "low": [9.0], "close": [10.5], "volume": [100],
+        "amount": [1050.0], "quote_ts": [1577948400000],
+    }).with_columns(pl.col("volume").cast(pl.Int64)))
+
+    stored = pl.read_parquet(
+        repo.store.data_dir / "kline_daily" / "date=2020-01-02" / "part.parquet"
+    )
+    assert stored.schema["volume"] == pl.Float64
+
+
 def test_sync_merges_partition_holding_a_realtime_snapshot_with_quote_ts(monkeypatch, repo):
     # 当天分区同时有流式直提的 8 列文件和实时快照写的带 quote_ts 的文件 (#536)。
     target = repo.store.data_dir / "kline_daily" / "date=2020-01-02"

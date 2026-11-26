@@ -11,6 +11,17 @@
 .regime-page button:disabled { cursor: not-allowed; opacity: .5; }
 .regime-page .text-muted { color: hsl(var(--fg-secondary)); }
 .regime-page .text-accent { color: color-mix(in srgb, hsl(var(--accent)), hsl(var(--fg-primary)) 18%); }
+.regime-market-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: hsl(var(--accent) / 0.12);
+  color: hsl(var(--accent));
+  font-size: 12px;
+  font-weight: 500;
+}
 .regime-tone { color: var(--metric-color, hsl(var(--accent))); }
 html:not(.dark) .regime-page .regime-tone { color: color-mix(in srgb, var(--metric-color, hsl(var(--accent))), hsl(var(--fg-primary)) 35%); }
 .regime-page .font-mono, .regime-score, .regime-metric-value, .regime-transition-value, .regime-distribution-count { font-variant-numeric: tabular-nums; }

@@ -37,6 +37,7 @@ from pathlib import Path
 import polars as pl
 
 from app.market_time import CN_TZ, cn_now, cn_today
+from app.markets import market_of
 from app.parquet import scan_daily_parquet
 from app.polars_guard import guarded_collect
 from app.services.index_const import CORE_INDEX_SYMBOLS
@@ -529,7 +530,9 @@ class QuoteService:
         # 延迟导入规避 services <-> api 层循环依赖。
         from app.api.overview import invalidate_overview_cache
 
-        invalidate_overview_cache()
+        # 这里只刷新 A 股实时行情; 港美股总览是慢路径重计算, 不该被 6s 一次的
+        # 行情推送连带清空。
+        invalidate_overview_cache(markets=["cn"])
         with self._lock:
             self._quote_revision += 1
         for sub in self._snapshot_subscribers():
@@ -1622,11 +1625,25 @@ class QuoteService:
                     ))
                     paper_events: list[dict] = []
                     for acc_id in paper_trading.list_account_ids(data_dir):
+                        acc_meta = paper_trading.get_account(data_dir, acc_id) or {}
+                        acc_market = str(acc_meta.get("market") or "cn")
+                        # 市场隔离: 只喂本市场标的 (A股/港股/美股账户互不越市)
+                        acc_snapshot = {
+                            sym: px for sym, px in snapshot.items()
+                            if market_of(sym) == acc_market
+                        }
                         paper_events.extend(
-                            paper_trading.evaluate_intraday(data_dir, snapshot, account_id=acc_id))
-                        feed = rule_events + paper_watch_events
-                        if feed:
-                            created = paper_auto.on_rule_events(data_dir, feed, account_id=acc_id)
+                            paper_trading.evaluate_intraday(data_dir, acc_snapshot, account_id=acc_id))
+                        # 风控出场扫描: 策略 STOP_LOSS / MAX_HOLD_DAYS 兜底卖
+                        # (迁移策略 EXIT_SIGNALS 为空时, 这是唯一的卖出来源)。
+                        swept = paper_auto.run_exit_sweep(data_dir, acc_snapshot, account_id=acc_id)
+                        paper_events.extend(paper_auto.auto_order_events(swept, account_id=acc_id))
+                        acc_feed = [
+                            ev for ev in (rule_events + paper_watch_events)
+                            if market_of(str(ev.get("symbol") or "")) == acc_market
+                        ]
+                        if acc_feed:
+                            created = paper_auto.on_rule_events(data_dir, acc_feed, account_id=acc_id)
                             paper_events.extend(paper_auto.auto_order_events(created, account_id=acc_id))
                     # 成交/自动跟单下单推送 (V3): 复用监控中心既有管道 —— SSE toast /
                     # 语音 (前端按 source 拼文案) / 系统通知 / alert_store 留痕 /
@@ -1921,8 +1938,10 @@ class QuoteService:
         """
         try:
             from app import secrets_store
-            from app.services import email_adapter, preferences, webhook_adapter
+            from app.services import email_adapter, feishu_app, preferences, webhook_adapter
+            from app.services.wecom_bot_service import WecomBotService
 
+            enabled_channels = set(preferences.get_webhook_enabled_channels())
             feishu_url = preferences.get_feishu_webhook_url()
             feishu_secret = preferences.get_feishu_webhook_secret()
             wecom_url = preferences.get_wecom_webhook_url()
@@ -1930,7 +1949,24 @@ class QuoteService:
             custom_secret = secrets_store.get_custom_webhook_secret()
             email_config = preferences.get_email_smtp_config()
             email_password = secrets_store.get_email_smtp_password()
-            if not any((feishu_url, wecom_url, custom_url, email_adapter.is_configured(email_config))):
+            # 飞书应用机器人: 三项齐全才算可投递
+            feishu_app_id = preferences.get_feishu_app_id()
+            feishu_app_secret = secrets_store.get_feishu_app_secret()
+            feishu_app_chat_id = preferences.get_feishu_app_chat_id()
+            feishu_app_ready = feishu_app.is_configured(
+                feishu_app_id, feishu_app_secret, feishu_app_chat_id
+            )
+            # 企微智能机器人: 需长连接已连接 + 已选目标会话
+            bot_svc = WecomBotService.instance()
+            wecom_bot_ready = bool(
+                bot_svc is not None
+                and bot_svc.status().get("connected")
+                and preferences.get_wecom_bot_chat_id()
+            )
+            if not any((
+                feishu_url, wecom_url, custom_url, feishu_app_ready, wecom_bot_ready,
+                email_adapter.is_configured(email_config),
+            )):
                 return
 
             # 反查规则, 过滤出启用推送的事件
@@ -1941,6 +1977,8 @@ class QuoteService:
                 # webhook_channels 指定本规则需要投递的外部渠道。
                 # 空列表 = 该规则不推送。仅推送「渠道已选 + 对应地址已配置」的组合。
                 channels = rule.get("webhook_channels") if rule else None
+                # 设置页勾选=全局启用: 未启用的渠道即使规则里残留也不投递
+                channels = [c for c in (channels or []) if c in enabled_channels]
                 if not channels:
                     continue
                 source = ev.get("source", "")
@@ -1973,6 +2011,23 @@ class QuoteService:
                         custom_secret,
                     )
                     enqueued += 1
+                if feishu_app_ready and "feishu_app" in channels:
+                    _WEBHOOK_EXECUTOR.submit(
+                        feishu_app.send_text,
+                        feishu_app_id,
+                        feishu_app_secret,
+                        feishu_app_chat_id,
+                        title,
+                        body,
+                    )
+                    enqueued += 1
+                if wecom_bot_ready and "wecom_bot" in channels and bot_svc is not None:
+                    _WEBHOOK_EXECUTOR.submit(
+                        bot_svc.send_text,
+                        preferences.get_wecom_bot_chat_id(),
+                        f"{title}\n{body}",
+                    )
+                    enqueued += 1
                 if email_adapter.is_configured(email_config) and "email" in channels:
                     _WEBHOOK_EXECUTOR.submit(
                         email_adapter.send_email,
@@ -1995,29 +2050,60 @@ class QuoteService:
         """
         try:
             from app import secrets_store
-            from app.services import preferences, webhook_adapter
+            from app.services import feishu_app, preferences, webhook_adapter
+            from app.services.wecom_bot_service import WecomBotService
 
+            enabled_channels = set(preferences.get_webhook_enabled_channels())
             feishu_url = preferences.get_feishu_webhook_url()
             feishu_secret = preferences.get_feishu_webhook_secret()
             wecom_url = preferences.get_wecom_webhook_url()
             custom_url = preferences.get_custom_webhook_url()
             custom_secret = secrets_store.get_custom_webhook_secret()
-            if not any((feishu_url, wecom_url, custom_url)):
+            feishu_app_id = preferences.get_feishu_app_id()
+            feishu_app_secret = secrets_store.get_feishu_app_secret()
+            feishu_app_chat_id = preferences.get_feishu_app_chat_id()
+            feishu_app_ready = feishu_app.is_configured(
+                feishu_app_id, feishu_app_secret, feishu_app_chat_id
+            )
+            bot_svc = WecomBotService.instance()
+            wecom_bot_ready = bool(
+                bot_svc is not None
+                and bot_svc.status().get("connected")
+                and preferences.get_wecom_bot_chat_id()
+            )
+            if not any((feishu_url, wecom_url, custom_url, feishu_app_ready, wecom_bot_ready)):
                 return
 
             enqueued = 0
             for ev in events:
                 body = f"{ev.get('symbol', '')} {ev.get('message', '')}".strip()
-                if feishu_url:
+                if feishu_url and "feishu" in enabled_channels:
                     _WEBHOOK_EXECUTOR.submit(
                         webhook_adapter.send_feishu, feishu_url, "模拟盘成交", body, feishu_secret)
                     enqueued += 1
-                if wecom_url:
+                if wecom_url and "wecom" in enabled_channels:
                     _WEBHOOK_EXECUTOR.submit(webhook_adapter.send_wecom, wecom_url, "模拟盘成交", body)
                     enqueued += 1
-                if custom_url:
+                if custom_url and "custom" in enabled_channels:
                     _WEBHOOK_EXECUTOR.submit(
                         webhook_adapter.send_custom, custom_url, "模拟盘成交", body, "paper_fill", ev, custom_secret)
+                    enqueued += 1
+                if feishu_app_ready and "feishu_app" in enabled_channels:
+                    _WEBHOOK_EXECUTOR.submit(
+                        feishu_app.send_text,
+                        feishu_app_id,
+                        feishu_app_secret,
+                        feishu_app_chat_id,
+                        "模拟盘成交",
+                        body,
+                    )
+                    enqueued += 1
+                if wecom_bot_ready and "wecom_bot" in enabled_channels and bot_svc is not None:
+                    _WEBHOOK_EXECUTOR.submit(
+                        bot_svc.send_text,
+                        preferences.get_wecom_bot_chat_id(),
+                        f"模拟盘成交\n{body}",
+                    )
                     enqueued += 1
             if enqueued:
                 logger.info("模拟盘 Webhook 已提交 %d 条 (异步投递, 失败记 WARNING)", enqueued)
@@ -2163,6 +2249,13 @@ class QuoteService:
 
             # ---- 全量回退路径 ----
             if not use_incremental:
+                # 启动期 warmup 正在重建同一份 A 股历史缓存并构建 live_agg,
+                # 此时再跑一遍全量计算只会抬高内存峰值 (实测与 warmup 叠加
+                # 曾把容器顶到 OOM); 跳过本轮, warmup 完成后下个 tick 走增量。
+                if asset_type == "stock" and getattr(self._repo, "_enriched_warming", False):
+                    logger.info("enriched 全量计算跳过: warmup 进行中, 等待缓存就绪后走增量")
+                    return
+
                 from datetime import timedelta
 
                 from app.indicators.pipeline import compute_enriched

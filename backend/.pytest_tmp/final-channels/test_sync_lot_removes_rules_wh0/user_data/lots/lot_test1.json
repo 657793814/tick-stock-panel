@@ -1,0 +1,11 @@
+{
+  "id": "lot_test1",
+  "symbol": "600519.SH",
+  "qty": 100,
+  "cost_price": 1500.0,
+  "buy_date": "2026-08-01",
+  "target_pct": 10,
+  "stop_pct": 5,
+  "remind_date": null,
+  "lead_days": 2
+}

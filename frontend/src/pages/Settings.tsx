@@ -6,7 +6,7 @@
 import { Suspense, lazy, useEffect, useState, type ComponentType } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { Database, KeyRound, LayoutGrid, Library, Radio, Sparkles, Settings2, PanelLeftClose, PanelLeftOpen, Clock3, Info, PackageOpen } from 'lucide-react'
+import { Database, KeyRound, LayoutGrid, Library, Radio, Sparkles, Settings2, PanelLeftClose, PanelLeftOpen, Clock3, Info, PackageOpen, MessageCircle } from 'lucide-react'
 // 面板按 tab 按需加载: 8 个面板源码 270KB+, 同步打包会让设置页 chunk 膨胀
 const SettingsAIPanel = lazy(() => import('./settings/AI').then(m => ({ default: m.SettingsAIPanel })))
 const SettingsApiTokensPanel = lazy(() => import('./settings/ApiTokens').then(m => ({ default: m.SettingsApiTokensPanel })))
@@ -18,6 +18,7 @@ const SettingsTimeoutPanel = lazy(() => import('./settings/Timeout').then(m => (
 const SettingsSystemPanel = lazy(() => import('./settings/System').then(m => ({ default: m.SettingsSystemPanel })))
 const SettingsAboutPanel = lazy(() => import('./settings/About').then(m => ({ default: m.SettingsAboutPanel })))
 const SettingsDataSourcesPanel = lazy(() => import('./settings/DataSources').then(m => ({ default: m.SettingsDataSourcesPanel })))
+const SettingsIMManagementPanel = lazy(() => import('./settings/IMManagement').then(m => ({ default: m.SettingsIMManagementPanel })))
 import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/cn'
 import { setUiPref } from '@/lib/uiPrefs'
@@ -35,6 +36,8 @@ type TabDef = {
 const TABS: readonly TabDef[] = [
   { key: 'data-sources', label: '数据源',     icon: Database,  panel: SettingsDataSourcesPanel },
   { key: 'ai',         label: 'AI 设置',    icon: Sparkles,  panel: SettingsAIPanel },
+  // IM 管理紧跟 AI 设置: 两者都是「外部能力接入」, 放一起便于统一配置
+  { key: 'IM-management', label: 'IM 管理', icon: MessageCircle, panel: SettingsIMManagementPanel },
   { key: 'monitoring', label: '实时监控',   icon: Radio,      panel: SettingsMonitoringPanel },
   { key: 'pages',      label: '页面管理',   icon: LayoutGrid, panel: SettingsPageAdminPanel },
   { key: 'timeout',    label: '网络设置',   icon: Clock3,     panel: SettingsTimeoutPanel },

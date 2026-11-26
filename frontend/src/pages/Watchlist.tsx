@@ -15,6 +15,7 @@ import { useWatchlistPrepare } from '@/lib/useWatchlistPrepare'
 import { reuseUnchangedSeries, EMPTY_ROWS } from '@/lib/series-identity'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
+import { useMarket, filterSymbolsByMarket } from '@/lib/market'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber, fmtAssetPrice } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
@@ -280,13 +281,16 @@ function StockSearchBox({
 }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
+  // 搜索按当前市场路由: A 股搜 instruments 池, 港美股搜各自维表。不传市场时
+  // 后端默认 cn, 会出现「在港股下搜小米搜不到」的问题。
+  const { market } = useMarket()
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const [activeIdx, setActiveIdx] = useState(-1)
 
   const search = useQuery({
-    queryKey: QK.instrumentSearch(query, 'stock,etf,index'),
-    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf,index'),
+    queryKey: QK.instrumentSearch(query, 'stock,etf,index', market),
+    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf,index', market),
     enabled: query.trim().length > 0,
     staleTime: 30_000,
   })
@@ -698,6 +702,9 @@ function minuteScopeFor(rows: { symbol: string; asset_type?: string }[]): string
 
 export function Watchlist() {
   const qc = useQueryClient()
+  // 自选可跨市场持有; 列表/行情按当前市场隔离 (与选股、总览一致),
+  // 切到港股只看到港股自选, 不会把 A 股标的混进港股视图。
+  const { market } = useMarket()
   const [viewMode, setViewMode] = useState<'table' | 'card'>(() => {
     return (storage.watchlistView.get('table') as 'table' | 'card')
   })
@@ -878,14 +885,18 @@ export function Watchlist() {
 
   // enriched 数据 — 传入 ext_columns 参数
   const enriched = useQuery({
-    queryKey: QK.watchlistEnriched(extColumnsParam),
-    queryFn: () => api.watchlistEnriched(extColumnsParam || undefined),
+    queryKey: QK.watchlistEnriched(extColumnsParam, market),
+    queryFn: () => api.watchlistEnriched(extColumnsParam || undefined, market),
     enabled: (list.data?.symbols.length ?? 0) > 0,
   })
   const preparation = useWatchlistPrepare(enriched.data?.rows)
 
   // 直接使用已保存的自选名单，图表请求无需等待 enriched 行情返回。
-  const symbols = useMemo(() => list.data?.symbols.map(entry => entry.symbol) ?? [], [list.data?.symbols])
+  // 按市场切分: 图表/分时/prepare 都只应针对当前市场的标的发请求。
+  const symbols = useMemo(
+    () => filterSymbolsByMarket(list.data?.symbols.map(entry => entry.symbol) ?? [], market),
+    [list.data?.symbols, market],
+  )
 
   // 实时行情状态 (提前到此处: 分时轮询判断需要 realtimeRunning)
   const quoteStatus = useQuoteStatus()
@@ -1090,7 +1101,12 @@ export function Watchlist() {
     setGroupCardsOpen(false)
   }, [])
 
-  const listEntries = list.data?.symbols ?? []
+  const listEntries = useMemo(() => {
+    const all = list.data?.symbols ?? []
+    // 全量清单留在缓存里 (mutation 返回的是全市场名单), 展示层按市场过滤,
+    // 分组统计/导航/卡片都跟着当前市场走。
+    return all.filter(e => filterSymbolsByMarket([e.symbol], market).length > 0)
+  }, [list.data?.symbols, market])
   const allSymbols = listEntries.map(s => s.symbol)
   // 兼容旧服务返回的重复行情，表格、卡片、分组统计与导航共用同一份行集合。
   const rows = useMemo(
