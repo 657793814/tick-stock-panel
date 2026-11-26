@@ -1,0 +1,14 @@
+{
+  "id": "uf_sp_liq_dev",
+  "kind": "custom",
+  "version": 1,
+  "label": "缩量偏离(60d)",
+  "group": "stock-picker",
+  "formula": "rank(log(amount) - ts_quantile(log(amount), 60, 0.5))",
+  "description": "log成交额相对60日中位偏离的横截面分位(缩量=高分) [stock-picker liq_dev]",
+  "direction": "low",
+  "status": "draft",
+  "archived": false,
+  "created_at": "2026-11-22T00:00:00",
+  "updated_at": "2026-11-22T00:00:00"
+}

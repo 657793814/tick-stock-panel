@@ -1,0 +1,45 @@
+{
+  "id": "ext_dragon_org",
+  "label": "龙虎榜机构净买(逐日)",
+  "mode": "timeseries",
+  "fields": [
+    {
+      "name": "symbol",
+      "dtype": "string",
+      "label": "标的代码"
+    },
+    {
+      "name": "org_net_value",
+      "dtype": "float",
+      "label": "机构净买额(元)"
+    },
+    {
+      "name": "dragon_net_value",
+      "dtype": "float",
+      "label": "龙虎榜净买额(元)"
+    },
+    {
+      "name": "hot_money_net_value",
+      "dtype": "float",
+      "label": "游资净买额(元)"
+    },
+    {
+      "name": "hot_rank",
+      "dtype": "float",
+      "label": "龙虎榜热度排名(低=热)"
+    }
+  ],
+  "description": "stock-picker 整合：龙虎榜机构净买额，逐日分区，可回测。数据来自 services/dragon_tiger.py 每日落盘 JSON（只有拉取过的日期有值）。",
+  "symbol_map": {
+    "type": "mapped",
+    "col": "symbol"
+  },
+  "code_map": {
+    "type": "computed",
+    "from": "symbol",
+    "method": "strip_exchange"
+  },
+  "market_level": false,
+  "created_at": "2026-11-23T00:05:33.820317",
+  "updated_at": "2026-11-23T00:05:33.820332"
+}

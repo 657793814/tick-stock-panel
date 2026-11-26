@@ -191,6 +191,13 @@ class Settings(BaseSettings):
     # AI 助手工具轮次检查点: 连续 N 轮工具调用未完成时弹「继续/停止」卡; 0=不检查。
     ai_round_checkpoint: int = 100
 
+    # 图像模型(复盘海报) — 与文本 AI 配置隔离。
+    # 留空时 base_url / api_key 回退到文本 AI 的对应值, 但模型必须单独指定。
+    image_base_url: str = ""
+    image_api_key: str = ""
+    image_model: str = ""
+    image_size: str = "1024x1536"
+
     # Server
     host: str = "0.0.0.0"
     port: int = 3018

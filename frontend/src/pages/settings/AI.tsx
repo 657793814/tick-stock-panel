@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Save, Loader2, Check, Wifi, Eye, EyeOff, Shield, SlidersHorizontal,
   Shuffle, ExternalLink, Trash2, FileCog, RefreshCw,
-  Terminal, ChevronDown, Sparkles, Atom, Waves, Cloud, Gem, Moon,
+  Terminal, ChevronDown, Sparkles, Atom, Waves, Cloud, Gem, Moon, Image as ImageIcon,
 } from 'lucide-react'
 import { useSettings } from '@/lib/useSharedQueries'
 import { api, type SettingsState, type SponsorModelItem } from '@/lib/api'
@@ -842,6 +842,8 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
           </div>
         )}
       </section>
+
+      <ImageModelCard s={s} />
       </div>
       </AnchorWrap>
 
@@ -903,6 +905,148 @@ function Field({ label, hint, inline, children }: {
       {children}
       {hint && <div className="text-[10px] text-muted/80">{hint}</div>}
     </div>
+  )
+}
+
+// ===== 图像模型(复盘海报) =====
+
+function ImageModelCard({ s }: { s?: SettingsState }) {
+  const qc = useQueryClient()
+  const [baseUrl, setBaseUrl] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [model, setModel] = useState('')
+  const [size, setSize] = useState('1024x1536')
+  const [showKey, setShowKey] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [confirmClear, setConfirmClear] = useState(false)
+
+  useEffect(() => {
+    if (!s) return
+    setBaseUrl(s.image_base_url ?? '')
+    setModel(s.image_model ?? '')
+    setSize(s.image_size || '1024x1536')
+    setApiKey('')
+  }, [s?.image_base_url, s?.image_model, s?.image_size, s?.image_api_key_masked])
+
+  const configured = s?.image_configured ?? false
+  const canSave = !!model.trim()
+
+  const save = useMutation({
+    mutationFn: () => api.saveImageAiSettings({
+      base_url: baseUrl.trim(),
+      ...(apiKey ? { api_key: apiKey } : {}),
+      model: model.trim(),
+      size: size.trim(),
+    }),
+    onSuccess: (result) => {
+      setSaved(true)
+      setApiKey('')
+      qc.setQueryData<SettingsState>(QK.settings, prev => prev ? {
+        ...prev,
+        image_base_url: result.image_base_url,
+        image_api_key_masked: result.image_api_key_masked,
+        has_image_key: result.has_image_key,
+        image_model: result.image_model,
+        image_size: result.image_size,
+        image_configured: result.image_configured,
+      } : prev)
+      qc.invalidateQueries({ queryKey: QK.settings })
+      window.setTimeout(() => setSaved(false), 2000)
+    },
+  })
+
+  const clear = useMutation({
+    mutationFn: () => api.clearImageAiSettings(),
+    onSuccess: () => {
+      setConfirmClear(false)
+      setBaseUrl('')
+      setApiKey('')
+      setModel('')
+      setSize('1024x1536')
+      qc.setQueryData<SettingsState>(QK.settings, prev => prev ? {
+        ...prev,
+        image_base_url: '',
+        image_api_key_masked: '',
+        has_image_key: false,
+        image_model: '',
+        image_size: '1024x1536',
+        image_configured: false,
+      } : prev)
+      qc.invalidateQueries({ queryKey: QK.settings })
+    },
+  })
+
+  return (
+    <section className="overflow-hidden rounded-card border border-border bg-surface">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <ImageIcon className="h-4 w-4 shrink-0 text-secondary" />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-foreground">图像模型</div>
+            <div className="mt-0.5 text-[11px] text-muted">用于「AI 复盘 · 生成图片」；与上方文本模型完全独立</div>
+          </div>
+        </div>
+        <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] ${configured ? 'border-bear/25 bg-bear/[0.06] text-bear' : 'border-border text-muted'}`}>
+          <span className={`h-1 w-1 rounded-full ${configured ? 'bg-bear' : 'bg-muted'}`} />
+          {configured ? '已配置' : '未配置'}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 px-5 py-4 md:grid-cols-2">
+        <Field label="接口地址" hint="留空则复用文本 AI 的地址；填到 /v1 即可，脚本路径自动补齐">
+          <input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://llm.runninghub.ai/v1" className={INPUT_CLS} />
+        </Field>
+        <Field label="图像模型" hint="必填，例如 gemini-2.5-flash-image / gpt-image-1 / dall-e-3">
+          <input value={model} onChange={e => setModel(e.target.value)} placeholder="gpt-image-1" className={INPUT_CLS} />
+        </Field>
+        <Field label="API Key" hint={s?.image_api_key_masked ? `当前：${s.image_api_key_masked}（留空保持）` : '留空则复用文本 AI 的 Key'}>
+          <div className="relative">
+            <input
+              type={showKey ? 'text' : 'password'}
+              value={apiKey}
+              onChange={e => setApiKey(e.target.value)}
+              placeholder={s?.image_api_key_masked || '留空复用文本 AI Key'}
+              className={`${INPUT_CLS} pr-10`}
+            />
+            <button type="button" onClick={() => setShowKey(v => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-foreground" title={showKey ? '隐藏' : '显示'}>
+              {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+        </Field>
+        <Field label="图片尺寸" hint="OpenAI 兼容格式，常用 1024x1024 / 1024x1536 / 1536x1024">
+          <input value={size} onChange={e => setSize(e.target.value)} placeholder="1024x1536" className={INPUT_CLS} />
+        </Field>
+      </div>
+
+      <div className="flex flex-col gap-3 border-t border-border/40 px-5 py-3 sm:flex-row sm:items-center">
+        <p className="min-w-0 flex-1 text-[10px] leading-relaxed text-muted">
+          兼容 OpenAI <code className="font-mono">images/generations</code> 接口。模型只生成氛围底图，中文标题与要点由服务端叠加，避免模型写错字。
+        </p>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <button type="button" onClick={() => setBaseUrl('https://llm.runninghub.ai/v1')} className="h-8 px-2.5 rounded-lg text-[11px] text-muted hover:bg-elevated hover:text-foreground transition-colors">RunningHub</button>
+          <button type="button" onClick={() => setBaseUrl('https://api.openai.com/v1')} className="h-8 px-2.5 rounded-lg text-[11px] text-muted hover:bg-elevated hover:text-foreground transition-colors">OpenAI</button>
+          {configured && (
+            <button
+              type="button"
+              onClick={() => { if (confirmClear) clear.mutate(); else setConfirmClear(true) }}
+              disabled={clear.isPending}
+              className="h-8 px-2.5 rounded-lg text-[11px] text-muted hover:bg-danger/10 hover:text-danger transition-colors disabled:opacity-50"
+            >
+              {confirmClear ? '确认清空' : '清空'}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => save.mutate()}
+            disabled={save.isPending || !canSave}
+            className="h-8 px-4 rounded-lg bg-accent text-white text-[11px] font-medium flex items-center gap-1.5 hover:bg-accent/90 disabled:opacity-40 transition-colors"
+          >
+            {save.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : saved ? <Check className="h-3.5 w-3.5" /> : <Save className="h-3.5 w-3.5" />}
+            {save.isPending ? '保存中' : saved ? '已保存' : '保存生图配置'}
+          </button>
+        </div>
+      </div>
+    </section>
   )
 }
 

@@ -4,6 +4,8 @@
 
 端点:
   POST /analyze                AI 流式大盘复盘(NDJSON)
+  POST /generate-image         复盘内容生成精美海报 PNG
+  GET  /images/{name}          读取生成的海报图片
   GET  /reports                历史复盘列表
   POST /reports                保存一条复盘报告
   DELETE /reports/{report_id}  删除一条复盘报告
@@ -13,11 +15,14 @@
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 from datetime import date as date_cls
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from app.services import auction_benchmark, dragon_tiger, market_recap_reports, preferences
 from app.services.market_recap import recap_market_stream
@@ -131,6 +136,100 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ================================================================
+# 复盘海报(图像模型生成氛围底图 + 服务端叠加清晰中文排版)
+# ================================================================
+
+_IMAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}\.png$")
+_RECAP_IMAGE_KEEP = 30
+
+
+def _recap_image_dir(request: Request) -> Path:
+    path = Path(request.app.state.repo.store.data_dir) / "recap_images"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _prune_recap_images(directory: Path, keep: int = _RECAP_IMAGE_KEEP) -> None:
+    files = sorted(directory.glob("*.png"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    for old in files[keep:]:
+        try:
+            old.unlink()
+        except OSError as exc:  # noqa: BLE001 — 清理失败不影响生图主流程
+            logger.warning("prune recap image failed: %s", exc)
+
+
+class GenerateImageRequest(BaseModel):
+    """根据复盘正文生成海报。"""
+    as_of: str = ""
+    content: str = Field(default="", max_length=40000)
+    summary: str = Field(default="", max_length=1000)
+    emotion_label: str = Field(default="", max_length=40)
+    emotion_score: int | None = None
+
+
+@router.post("/generate-image")
+async def generate_recap_image(request: Request, req: GenerateImageRequest):
+    """调用已配置的图像模型生成底图，再叠加复盘标题/摘要/要点输出 PNG 海报。"""
+    from app.services.image_provider import ImageGenerationError, generate_image, image_configured
+    from app.services.recap_poster import build_image_prompt, render_poster
+
+    if not image_configured():
+        raise HTTPException(
+            status_code=400,
+            detail="尚未配置生图模型：请到「设置 · AI 服务 · 图像模型」填写模型名称与接口地址",
+        )
+    if not req.content.strip():
+        raise HTTPException(status_code=400, detail="复盘内容为空，无法生成海报")
+
+    prompt = build_image_prompt(
+        req.content,
+        as_of=req.as_of,
+        summary=req.summary,
+        emotion_label=req.emotion_label,
+        emotion_score=req.emotion_score,
+    )
+    try:
+        generated = await generate_image(prompt)
+        poster = render_poster(
+            generated.content,
+            content=req.content,
+            as_of=req.as_of,
+            summary=req.summary,
+            emotion_label=req.emotion_label,
+            emotion_score=req.emotion_score,
+        )
+    except ImageGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — 海报排版失败时给出可操作提示,不暴露堆栈
+        logger.exception("render recap poster failed")
+        raise HTTPException(status_code=500, detail=f"海报生成失败: {exc}") from exc
+
+    directory = _recap_image_dir(request)
+    name = f"recap-{uuid.uuid4().hex[:16]}.png"
+    (directory / name).write_bytes(poster)
+    _prune_recap_images(directory)
+    return {
+        "ok": True,
+        "id": name.removesuffix(".png"),
+        "name": name,
+        "url": f"/api/market-recap/images/{name}",
+        "width": 1080,
+        "height": 1620,
+    }
+
+
+@router.get("/images/{name}")
+def get_recap_image(request: Request, name: str):
+    """读取生成的海报 PNG，严格校验文件名避免目录穿越。"""
+    if not _IMAGE_NAME_RE.fullmatch(name):
+        raise HTTPException(status_code=404, detail="图片不存在")
+    path = _recap_image_dir(request) / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ================================================================

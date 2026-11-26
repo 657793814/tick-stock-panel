@@ -1,15 +1,15 @@
 """stock-picker 整合阶段 2：新增 B 类因子的解析/注册/物化验证。
 
-覆盖 data/user_data/custom_factors/ 下三个落盘定义：
-- uf_sp_liq_dev  (DSL, liq_dev 缩量偏离)
-- uf_sp_vol_dev  (DSL, vol_dev 波动收敛偏离)
-- cf_sp_technical (composite, technical 技术形态近似)
+覆盖三个落盘定义（DSL liq_dev / vol_dev 与 composite technical）：
 
-测试用临时 data_dir 隔离，不改真实数据目录，不污染全局注册表。
+测试全部读 fixtures/stock-picker/ 下随仓库提交的种子数据，不依赖用户本地
+data/（该目录被 .gitignore 排除，CI 干净 checkout 时不存在），保证 CI 可复现。
+测试不改真实数据目录，注册表在各用例间自行清理。
 """
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -19,6 +19,8 @@ from app.factors.registry import _REGISTRY, get_factor, register_factor, unregis
 from app.strategy import scoring
 
 SP_IDS = ("uf_sp_liq_dev", "uf_sp_vol_dev", "cf_sp_technical")
+REPO_ROOT = Path(__file__).resolve().parents[1].parent
+SP_DATA_DIR = Path(__file__).resolve().parent / "fixtures" / "stock-picker"
 
 
 @pytest.fixture()
@@ -26,7 +28,7 @@ def isolated_registry():
     """用真实落盘定义加载后再清理，保证测试后注册表恢复。"""
     from pathlib import Path
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     definitions = {d["id"]: d for d in store.load_all(data_dir) if d["id"] in SP_IDS}
     registered: list[str] = []
     for fid in SP_IDS:
@@ -79,8 +81,8 @@ def test_liq_dev_warmup_and_direction():
     """liq_dev 依赖 amount，warmup 60 日中位 → >=61。"""
     from pathlib import Path
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
-    defn = next(d for d in store.load_all(data_dir) if d["id"] == "uf_sp_liq_dev")
+    data_dir = SP_DATA_DIR
+    defn = next(d for d in store.load_all(SP_DATA_DIR) if d["id"] == "uf_sp_liq_dev")
     spec = store.to_spec(defn)
     assert "amount" in spec.dependencies
     assert spec.warmup_bars >= 61
@@ -102,7 +104,7 @@ def test_composite_member_weights_sum():
     """technical composite 成员权重合法（2~8 个，权重非负）。"""
     from pathlib import Path
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     defn = next(d for d in store.load_all(data_dir) if d["id"] == "cf_sp_technical")
     members = defn["members"]
     assert 2 <= len(members) <= 8
@@ -118,7 +120,7 @@ def test_strategies_load_from_data_dir():
 
     from app.strategy.engine import StrategyEngine
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     engine = StrategyEngine(strategy_dirs=[data_dir / "strategies" / "custom"])
     for sid in ("csp_short_multifactor", "csp_long_multifactor"):
         assert engine.has(sid), f"{sid} 未加载: {engine.load_errors()}"
@@ -135,7 +137,7 @@ def test_short_strategy_filter_executes():
 
     from app.strategy.engine import StrategyEngine
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     engine = StrategyEngine(strategy_dirs=[data_dir / "strategies" / "custom"])
     s = engine.get("csp_short_multifactor")
     frame = _panel()
@@ -151,7 +153,7 @@ def test_long_strategy_filter_executes():
 
     from app.strategy.engine import StrategyEngine
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     engine = StrategyEngine(strategy_dirs=[data_dir / "strategies" / "custom"])
     s = engine.get("csp_long_multifactor")
     frame = _panel().with_columns((pl.col("close") * 0.1).alias("roe_latest"))
@@ -167,14 +169,14 @@ def test_dragon_tiger_ingest_produces_factor_column():
     import importlib.util
     from pathlib import Path
 
-    scripts = Path(__file__).resolve().parents[1].parent / "scripts" / "ingest_dragon_tiger_factors.py"
+    scripts = REPO_ROOT / "scripts" / "ingest_dragon_tiger_factors.py"
     if not scripts.exists():
         pytest.skip("入因子脚本不存在")
     spec = importlib.util.spec_from_file_location("ingest_dragon", scripts)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     files = sorted((data_dir / "dragon_tiger").glob("date=*.json"))
     if not files:
         pytest.skip("无龙虎榜样例数据")
@@ -190,7 +192,7 @@ def test_long_strategy_includes_institutional_factor():
 
     from app.strategy.engine import StrategyEngine
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     engine = StrategyEngine(strategy_dirs=[data_dir / "strategies" / "custom"])
     scoring = engine.get("csp_long_multifactor").meta["scoring"]
     assert any("dragon" in k and v > 0 for k, v in scoring.items())
@@ -208,7 +210,7 @@ def test_short_strategy_scoring_end_to_end():
     from app.strategy.engine import StrategyEngine
     from app.strategy.scoring import materialize_scoring_columns
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     load_runtime_registry(data_dir)
     ensure_synced(data_dir)
     engine = StrategyEngine(strategy_dirs=[data_dir / "strategies" / "custom"])
@@ -253,7 +255,7 @@ def test_strategies_visible_to_backtest_worker():
     from app.factors.ext_factors import ensure_synced
     from app.strategy.engine import StrategyEngine
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     load_runtime_registry(data_dir)
     ensure_synced(data_dir)
     engine = StrategyEngine(strategy_dirs=_strategy_dirs(data_dir))
@@ -268,19 +270,18 @@ def test_theme_factor_ingest_t1_lag():
     import importlib.util
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[1].parent
-    p = root / "scripts" / "ingest_theme_factors.py"
+    p = REPO_ROOT / "scripts" / "ingest_theme_factors.py"
     if not p.exists():
         pytest.skip("题材因子脚本不存在")
     spec = importlib.util.spec_from_file_location("ingest_theme", p)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    panel = mod.build_theme_panel(root / "data")
+    panel = mod.build_theme_panel(SP_DATA_DIR)
     assert not panel.is_empty()
     assert "theme_score" in panel.columns
     # T-1 语义：生效日必须严格晚于 mainline 原始日期（通过 eff_date 映射体现）
-    src = pl.read_parquet(root / "data" / "mainline_history" / "part.parquet")
+    src = pl.read_parquet(SP_DATA_DIR / "mainline_history" / "part.parquet")
     assert panel["date"].n_unique() > 0
     assert src["date"].min() <= panel["date"].min()
 
@@ -290,8 +291,7 @@ def test_dragon_tiger_payload_fields():
     import importlib.util
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[1].parent
-    p = root / "scripts" / "backfill_dragon_tiger_history.py"
+    p = REPO_ROOT / "scripts" / "backfill_dragon_tiger_history.py"
     spec = importlib.util.spec_from_file_location("backfill_dt", p)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -314,7 +314,7 @@ def test_full_strategy_all_factors_registered():
     from app.factors.registry import get_factor
     from app.strategy.engine import StrategyEngine
 
-    data_dir = Path(__file__).resolve().parents[1].parent / "data"
+    data_dir = SP_DATA_DIR
     invalidate_ext_caches()
     load_runtime_registry(data_dir)
     ensure_synced(data_dir)

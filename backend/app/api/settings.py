@@ -103,6 +103,23 @@ def get_settings() -> dict:
         "ai_max_output_tokens": current_ai_max_output_tokens(),
         "ai_context_window": current_ai_context_window(),
         "ai_round_checkpoint": current_ai_round_checkpoint(),
+        # 图像模型(复盘海报) — 与文本 AI 配置隔离
+        "image_base_url": secrets_store.get_ai_config("image_base_url", settings.image_base_url),
+        "image_api_key_masked": secrets_store.mask(
+            str(secrets_store.load().get("image_api_key") or secrets_store.get_ai_key())
+        ),
+        "has_image_key": bool(
+            str(secrets_store.load().get("image_api_key") or secrets_store.get_ai_key())
+        ),
+        "image_model": secrets_store.get_ai_config("image_model", settings.image_model),
+        "image_size": secrets_store.get_ai_config("image_size", settings.image_size),
+        "image_configured": bool(
+            secrets_store.get_ai_config("image_model", settings.image_model).strip()
+            and (
+                secrets_store.get_ai_config("image_base_url", settings.image_base_url).strip()
+                or secrets_store.get_ai_config("ai_base_url", settings.ai_base_url).strip()
+            )
+        ),
     }
 
 
@@ -449,6 +466,82 @@ def clear_ai_settings() -> dict:
     settings.ai_max_output_tokens = 16384
     settings.ai_context_window = 128000
 
+    return {"ok": True}
+
+
+class ImageSettingsIn(BaseModel):
+    """图像模型配置(复盘海报生图) — 与文本 AI 配置隔离。"""
+    base_url: str = ""
+    api_key: str | None = None      # None=保持原值; 空串=清除并回退文本 Key
+    model: str = ""
+    size: str = ""
+
+
+@router.post("/image-ai")
+def save_image_settings(req: ImageSettingsIn) -> dict:
+    """保存生图模型配置到 secrets.json。
+
+    base_url / api_key 留空代表回退到文本 AI 的同名配置；model 留空则关闭生图。
+    """
+    from app.config import settings as runtime_settings
+    from app.services.image_provider import current_image_size, image_configured, current_image_model
+
+    base_url = req.base_url.strip()
+    model = req.model.strip()
+    size = req.size.strip()
+
+    if base_url:
+        secrets_store.save({"image_base_url": base_url})
+        runtime_settings.image_base_url = base_url
+    else:
+        secrets_store.clear("image_base_url")
+        runtime_settings.image_base_url = ""
+
+    if req.api_key is not None:
+        key = req.api_key.strip()
+        if key:
+            secrets_store.save({"image_api_key": key})
+        else:
+            secrets_store.clear("image_api_key")
+
+    if model:
+        secrets_store.save({"image_model": model})
+        runtime_settings.image_model = model
+    else:
+        secrets_store.clear("image_model")
+        runtime_settings.image_model = ""
+
+    if size:
+        secrets_store.save({"image_size": size})
+        runtime_settings.image_size = size
+    else:
+        secrets_store.clear("image_size")
+        runtime_settings.image_size = ""
+
+    effective_key = str(
+        secrets_store.load().get("image_api_key") or secrets_store.get_ai_key()
+    )
+    return {
+        "ok": True,
+        "image_base_url": secrets_store.get_ai_config("image_base_url", runtime_settings.image_base_url),
+        "image_model": current_image_model(),
+        "image_size": current_image_size(),
+        "image_api_key_masked": secrets_store.mask(effective_key),
+        "has_image_key": bool(effective_key),
+        "image_configured": image_configured(),
+    }
+
+
+@router.delete("/image-ai")
+def clear_image_settings() -> dict:
+    """一键清空生图配置，不影响文本 AI 设置。"""
+    from app.config import settings as runtime_settings
+
+    secrets_store.clear("image_base_url", "image_api_key", "image_model", "image_size")
+    runtime_settings.image_base_url = ""
+    runtime_settings.image_api_key = ""
+    runtime_settings.image_model = ""
+    runtime_settings.image_size = "1024x1536"
     return {"ok": True}
 
 

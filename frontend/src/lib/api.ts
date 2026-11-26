@@ -796,6 +796,15 @@ export interface AiReviewReport {
   created_at: string
 }
 
+export interface RecapImageResult {
+  ok: boolean
+  id: string
+  name: string
+  url: string
+  width: number
+  height: number
+}
+
 // ===== 龙虎榜 (fuyao 专有, 复盘页) =====
 export interface DragonTigerStockItem {
   /** 后端已归一 (缺失时由 ticker 推导); 旧缓存/异常数据源可能为 null, 消费方需兜底 */
@@ -2275,6 +2284,13 @@ export interface SettingsState {
   ai_max_output_tokens?: number
   ai_context_window?: number
   ai_round_checkpoint?: number
+  // 图像模型(复盘海报)
+  image_base_url?: string
+  image_api_key_masked?: string
+  has_image_key?: boolean
+  image_model?: string
+  image_size?: string
+  image_configured?: boolean
 }
 
 /** 保存 TickFlow Key 的响应(先探后存) */
@@ -2288,6 +2304,16 @@ export interface SaveTickflowKeyResult {
   current_endpoint?: string
   tickflow_api_key_masked?: string
   capabilities_count?: number
+}
+
+export interface ImageSettingsResult {
+  ok: boolean
+  image_base_url: string
+  image_model: string
+  image_size: string
+  image_api_key_masked: string
+  has_image_key: boolean
+  image_configured: boolean
 }
 
 export interface DataSourceItem {
@@ -3005,6 +3031,16 @@ export const api = {
   /** 一键清空 AI 配置(保留自定义 UA) */
   clearAiSettings: () =>
     request<{ ok: boolean }>('/api/settings/ai', { method: 'DELETE' }),
+
+  /** 保存图像模型配置(复盘海报),与文本 AI 配置隔离 */
+  saveImageAiSettings: (image: { base_url?: string; api_key?: string | null; model?: string; size?: string }) =>
+    request<ImageSettingsResult>('/api/settings/image-ai', {
+      method: 'POST', body: JSON.stringify(image),
+    }),
+
+  /** 清空图像模型配置,不影响文本 AI */
+  clearImageAiSettings: () =>
+    request<{ ok: boolean }>('/api/settings/image-ai', { method: 'DELETE' }),
 
   /** 草稿连通性测试 — 只验证当前表单值, 不保存任何配置 */
   testAiSettings: async (
@@ -4882,6 +4918,20 @@ export const api = {
 
   reviewReportDelete: (reportId: string) =>
     request<{ ok: boolean }>(`/api/market-recap/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' }),
+
+  /** 把复盘内容生成精美海报(图像模型底图 + 服务端中文排版) */
+  generateRecapImage: (payload: {
+    as_of?: string
+    content: string
+    summary?: string
+    emotion_label?: string
+    emotion_score?: number | null
+  }) =>
+    request<RecapImageResult>('/api/market-recap/generate-image', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: 180_000,
+    }),
 
   /**
    * AI 大盘复盘 — 流式调用(NDJSON,与个股/财务分析同协议)。

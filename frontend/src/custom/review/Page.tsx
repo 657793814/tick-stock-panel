@@ -16,9 +16,10 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   BookOpenCheck, RefreshCw, Sparkles, Trash2, History, ChevronRight, AlertTriangle,
   Database, Wand2, Copy, Download, Clock, X, Check, Trophy, ChevronDown, ChevronUp,
+  Image as ImageIcon, Loader2,
 } from 'lucide-react'
 
-import { api, type OverviewMarket, type AiReviewReport, type DragonTigerStockItem } from '@/lib/api'
+import { api, type OverviewMarket, type AiReviewReport, type RecapImageResult, type DragonTigerStockItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { fmtPct, fmtVolume, priceColorClass } from '@/lib/format'
@@ -398,6 +399,12 @@ export function ReviewPage() {
                   onDownload={downloadContent}
                   onRegenerate={generate}
                   reportEndRef={reportEndRef}
+                  posterMeta={{
+                    as_of: displayDate,
+                    summary: viewing?.summary ?? meta?.summary ?? '',
+                    emotion_label: viewing?.emotion_label ?? meta?.emotion_label ?? '',
+                    emotion_score: viewing?.emotion_score ?? meta?.emotion_score ?? null,
+                  }}
                 />
                 <HistoryPanel
                   reports={historyQuery.data?.reports ?? []}
@@ -864,6 +871,7 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
 // ================================================================
 function ReportPanel({
   phase, content, error, isGenerating, viewing, onCopy, onDownload, onRegenerate, reportEndRef,
+  posterMeta,
 }: {
   phase: ReviewPhase
   content: string
@@ -874,7 +882,48 @@ function ReportPanel({
   onDownload: () => void
   onRegenerate: () => void
   reportEndRef: React.RefObject<HTMLDivElement>
+  posterMeta: {
+    as_of: string
+    summary?: string
+    emotion_label?: string
+    emotion_score?: number | null
+  }
 }) {
+  const [poster, setPoster] = useState<RecapImageResult | null>(null)
+  const [posterLoading, setPosterLoading] = useState(false)
+  const [posterOpen, setPosterOpen] = useState(false)
+
+  useEffect(() => {
+    setPoster(null)
+    setPosterOpen(false)
+  }, [content, viewing?.id])
+
+  const generatePoster = async () => {
+    if (!content.trim() || posterLoading) return
+    setPosterLoading(true)
+    try {
+      const result = await api.generateRecapImage({
+        as_of: posterMeta.as_of,
+        content,
+        summary: posterMeta.summary,
+        emotion_label: posterMeta.emotion_label,
+        emotion_score: posterMeta.emotion_score,
+      })
+      setPoster(result)
+      setPosterOpen(true)
+      toast('海报已生成', 'success')
+    } catch { /* request 统一 toast */ }
+    finally { setPosterLoading(false) }
+  }
+
+  const downloadPoster = () => {
+    if (!poster) return
+    const a = document.createElement('a')
+    a.href = poster.url
+    a.download = `复盘海报_${posterMeta.as_of || 'latest'}.png`
+    a.click()
+  }
+
   if (phase === 'error') {
     return (
       <div className="flex flex-col items-center justify-center gap-3 rounded-card border border-border bg-surface/80 px-6 py-14">
@@ -942,6 +991,7 @@ function ReportPanel({
   const isLoading = phase === 'loading' && !content
 
   return (
+    <>
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -961,6 +1011,10 @@ function ReportPanel({
             </button>
             <button onClick={onDownload} className="inline-flex items-center gap-1 rounded-btn bg-elevated px-2 py-1 text-[11px] text-secondary transition-colors hover:text-foreground hover:bg-elevated/70" title="下载为 Markdown">
               <Download className="h-3 w-3" />下载
+            </button>
+            <button onClick={generatePoster} disabled={posterLoading} className="inline-flex items-center gap-1 rounded-btn bg-accent/15 px-2 py-1 text-[11px] text-accent transition-colors hover:bg-accent/25 disabled:opacity-50" title="用图像模型生成精美海报">
+              {posterLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <ImageIcon className="h-3 w-3" />}
+              {posterLoading ? '生图中' : '生成图片'}
             </button>
           </div>
         )}
@@ -996,6 +1050,26 @@ function ReportPanel({
         <div ref={reportEndRef} />
       </div>
     </motion.div>
+
+    {posterOpen && poster && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={() => setPosterOpen(false)}>
+        <div className="flex max-h-[92vh] w-auto flex-col rounded-card border border-border bg-surface p-3 shadow-2xl" onClick={e => e.stopPropagation()}>
+          <div className="mb-2 flex items-center justify-between gap-4">
+            <div className="text-xs font-medium text-foreground">复盘海报 · {posterMeta.as_of}</div>
+            <div className="flex items-center gap-2">
+              <button onClick={downloadPoster} className="inline-flex items-center gap-1 rounded-btn bg-accent/15 px-2 py-1 text-[11px] text-accent transition-colors hover:bg-accent/25">
+                <Download className="h-3 w-3" />下载 PNG
+              </button>
+              <button onClick={() => setPosterOpen(false)} className="inline-flex items-center rounded-btn px-1.5 py-1 text-secondary transition-colors hover:bg-elevated hover:text-foreground" title="关闭">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+          <img src={poster.url} alt="复盘海报" className="mx-auto max-h-[78vh] w-auto rounded-lg border border-border/60" />
+        </div>
+      </div>
+    )}
+    </>
   )
 }
 
