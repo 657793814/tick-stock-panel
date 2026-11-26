@@ -1635,7 +1635,15 @@ class KlineRepository:
         # 若把过滤后的结果写入缓存, 后续不同 symbols 的查询会命中残缺缓存,
         # 导致新加入自选的标的查不到名称。
         name_map: dict[str, str] = {}
-        for df in (self.get_instruments(), self.get_etf_instruments(), self.get_instruments_asset("index")):
+        frames = [self.get_instruments(), self.get_etf_instruments(), self.get_instruments_asset("index")]
+        # 港美股维表单独存放, 不并入 A 股 instruments 池; 名称解析需要显式合并,
+        # 否则港美股在梯队/看板/自选里只能显示代码。
+        for mkt in ("hk", "us"):
+            try:
+                frames.append(self.get_instruments_market(mkt))
+            except Exception as e:  # noqa: BLE001 — 维表缺失不应阻断名称解析
+                logger.debug("name map: market instruments %s unavailable: %s", mkt, e)
+        for df in frames:
             if df.is_empty() or "symbol" not in df.columns or "name" not in df.columns:
                 continue
             for symbol, name in df.select(["symbol", "name"]).iter_rows():

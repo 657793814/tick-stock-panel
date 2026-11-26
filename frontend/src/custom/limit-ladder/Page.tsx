@@ -793,7 +793,10 @@ function OverviewBar({ tiers, dateValue, onDateChange, filterKeys, bf, direction
   const mainStatus = direction === 'down' ? 'limit_down' : 'limit_up'
   const brokenStatus = direction === 'down' ? 'recovery' : 'broken'
   // 命中数: 涨停/跌停主状态(含无 status 兜底)
-  const limitUpCounts = tiers.map(t => t.stocks.filter(s => s.status === mainStatus || !s.status).length)
+  // 港美股无涨停状态, 梯队规模直接取个股数, 否则导航条会全部显示 0
+  const limitUpCounts = tiers.map(t => (market === 'cn'
+    ? t.stocks.filter(s => s.status === mainStatus || !s.status).length
+    : t.stocks.length))
   const maxCount = Math.max(...limitUpCounts, 1)
   const showBroken = (filterKeys.has('broken') || filterKeys.has('recovery')) && cfg.brokenShow
   const showFailed = filterKeys.has('failed') && cfg.failedShow
@@ -1017,7 +1020,10 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
   const showBroken = (filterKeys.has('broken') || filterKeys.has('recovery')) && cfg.brokenShow
   const showFailed = filterKeys.has('failed') && cfg.failedShow
 
-  const luCount = tier.stocks.filter(s => s.status === mainStatus || !s.status).length
+  // 港美股是新高/新低强度榜, 没有 limit_up 状态; 直接按梯队个股数计数。
+  const luCount = market === 'cn'
+    ? tier.stocks.filter(s => s.status === mainStatus || !s.status).length
+    : tier.stocks.length
   const brCount = cfg.brokenCount ? tier.stocks.filter(s => s.status === brokenStatus).length : 0
   const faCount = cfg.failedCount ? tier.stocks.filter(s => s.status === 'failed').length : 0
 
@@ -1567,7 +1573,12 @@ export function LimitUpLadder() {
 
   const rawTiers = data?.tiers ?? []
   // filterTiers 每次返回新数组, 不 memo 会破坏 React.memo(StockCard) 且全梯队二次排序
-  const tiers = useMemo(() => filterTiers(rawTiers, filterKeys, extFields.bf), [rawTiers, filterKeys, extFields.bf])
+  // 港美股是「新高/新低强度梯队」, 没有涨跌停状态与 A 股板块维度,
+  // 套用 A 股过滤器会因 board 缺失把所有标的过滤掉 (页面只剩表头), 故直接跳过。
+  const tiers = useMemo(
+    () => (market === 'cn' ? filterTiers(rawTiers, filterKeys, extFields.bf) : rawTiers),
+    [rawTiers, market, filterKeys, extFields.bf],
+  )
   const displayDate = data?.as_of ?? asOf
 
   // 单源: 梯队按展示同款过滤+排序一次 (监控优先 → 状态 → 封单量),
@@ -1713,8 +1724,8 @@ export function LimitUpLadder() {
               </>
             )}
 
-            {/* 状态组: 涨停/炸板/断板 或 跌停/翘板/止跌 */}
-            {statusTabs(direction).map(tab => (
+            {/* 状态组: 涨停/炸板/断板 或 跌停/翘板/止跌 (仅 A 股有涨跌停概念) */}
+            {market === 'cn' && statusTabs(direction).map(tab => (
               <button
                 key={tab.key}
                 onClick={() => toggleFilter(tab.key)}
@@ -1728,9 +1739,10 @@ export function LimitUpLadder() {
               </button>
             ))}
 
+            {/* 显示组: 概念/行业 + 板块 (港美股无这些维度) */}
+            {market === 'cn' && <>
             <div className="w-px h-4 bg-border mx-1" />
 
-            {/* 显示组: 概念/行业 */}
             <button
               onClick={toggleConcept}
               className={`px-2 py-1 text-xs transition-colors ${
@@ -1754,7 +1766,7 @@ export function LimitUpLadder() {
 
             <div className="w-px h-4 bg-border mx-1" />
 
-            {/* 板块组 */}
+            {/* 板块组 (仅 A 股) */}
             {BOARD_TABS.map(tab => (
               <button
                 key={tab.key}
@@ -1768,6 +1780,7 @@ export function LimitUpLadder() {
                 {tab.label}
               </button>
             ))}
+            </>}
 
             <div className="w-px h-4 bg-border mx-1" />
             <button
@@ -1792,7 +1805,7 @@ export function LimitUpLadder() {
       <OverviewBar tiers={tiers} dateValue={dateValue} onDateChange={setAsOf} filterKeys={filterKeys} bf={extFields.bf} direction={direction} market={market} />
 
       {/* 概念统计 */}
-      {(extFields.showConceptStats ?? true) && (
+      {(market === 'cn' && (extFields.showConceptStats ?? true)) && (
         <TagStats
           title="概念分布"
           tiers={tiers}
@@ -1806,7 +1819,7 @@ export function LimitUpLadder() {
         />
       )}
       {/* 行业统计 */}
-      {(extFields.showIndustryStats ?? true) && (
+      {(market === 'cn' && (extFields.showIndustryStats ?? true)) && (
         <TagStats
           title="行业分布"
           tiers={tiers}
