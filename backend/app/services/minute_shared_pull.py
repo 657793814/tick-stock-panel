@@ -44,9 +44,34 @@ def cache_info() -> dict:
     return _work.cache_info()
 
 
+def _as_data_dir(value) -> Path | None:
+    """把 data_dir 解析为 Path, 非 str/Path 的"伪路径"对象返回 None。
+
+    MagicMock 带 `__fspath__`, 所以 `Path(MagicMock())` 不会报错, 而是静默变成
+    相对路径 `MagicMock/mock.app.state.repo.store.data_dir/<id>`; 一旦落盘就会在
+    仓库里长出一堆 parquet 脏文件。这里收窄到 str/Path: 拿不到真实目录时只
+    返回数据、不落盘, 绝不往当前工作目录写。
+    """
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str):
+        return Path(value)
+    return None
+
+
 def pull(repo, symbols: list[str], *, asset_type: str, start: datetime, end: datetime,
          batch_size: int, rpm: int, raw_basis: bool, on_updated=None) -> pl.DataFrame:
-    root = Path(repo.store.data_dir)
+    root = _as_data_dir(repo.store.data_dir)
+    if root is None:
+        # 没有真实 data_dir (测试替身): 不落盘、不进共享缓存, 直接透传拉取结果。
+        # 走缓存会因 key 里没有真实根目录而跨用例串味。
+        logger.debug("minute-batch 跳过落盘: data_dir 不是真实路径 (%s)",
+                     type(repo.store.data_dir).__name__)
+        return kline_sync.sync_minute_batch(
+            list(symbols), start_time=start, end_time=end, batch_size=batch_size, rpm=rpm,
+            asset_type=asset_type, raw_basis=raw_basis,
+        )
+
     source = kline_sync.minute_source_stamp()
     folder = root / ("kline_etf_minute" if asset_type == "etf" else "kline_minute")
     partition = folder / f"date={start.date()}"

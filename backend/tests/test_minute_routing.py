@@ -281,7 +281,7 @@ def test_on_chunk_done_wrapped_to_3_args(monkeypatch):
 
 # ---------- 测试 9: get_minute_batch 按 asset_type 拆分调用 sync_minute_batch ----------
 
-def test_get_minute_batch_splits_stock_and_etf(monkeypatch):
+def test_get_minute_batch_splits_stock_and_etf(monkeypatch, tmp_path):
     """get_minute_batch 把 incomplete 拆成 stock/ETF 两组, 分别以
     asset_type='stock'/'etf' 调用 sync_minute_batch, 结果 concat 返回。
 
@@ -304,6 +304,10 @@ def test_get_minute_batch_splits_stock_and_etf(monkeypatch):
     mock_repo = MagicMock()
     mock_repo.get_etf_symbol_set.return_value = {"510300.SH"}
     mock_repo.get_minute_batch.return_value = pl.DataFrame()
+    # 必须是真实 Path: 端点会 Path(data_dir) 并落盘, 留 Mock 会静默写到
+    # MagicMock/mock.app.state... 相对目录 (见 minute_shared_pull._as_data_dir)。
+    mock_repo.store.data_dir = tmp_path
+    mock_repo._write_lock = Lock()
 
     # mock capset: 有权限, limits 返回 None (lim.batch 访问被 `if lim else` 守护)
     mock_capset = MagicMock()
@@ -1394,3 +1398,31 @@ def test_preferences_parallel_saves_do_not_lose_each_other(tmp_path, monkeypatch
     final = prefs.load()
     assert final["minute_batch_compress"] is False
     assert final["daily_batch_compress"] is False
+
+
+def test_pull_does_not_write_when_data_dir_is_mock(monkeypatch, tmp_path):
+    """data_dir 是 Mock 替身时只返回数据, 不得在 CWD 落出 MagicMock/ 脏目录。
+
+    MagicMock 带 __fspath__, Path(mock) 会静默变成
+    `MagicMock/mock.app.state.repo.store.data_dir/<id>` 相对路径, 历史上 CI
+    跑完就把这批 parquet 提交进了仓库。
+    """
+    from app.services import kline_sync, minute_shared_pull
+
+    monkeypatch.setattr(
+        kline_sync, "sync_minute_batch",
+        lambda *a, **k: _bars("600519.SH", [datetime(2026, 1, 15, 9, 31)]),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    repo = MagicMock()
+    repo.store.data_dir = MagicMock()  # 未指定真实目录
+
+    out = minute_shared_pull.pull(
+        repo, ["600519.SH"], asset_type="stock",
+        start=datetime(2026, 1, 15, 9, 30), end=datetime(2026, 1, 15, 15, 0),
+        batch_size=10, rpm=10, raw_basis=False,
+    )
+
+    assert out.height == 1
+    assert not (tmp_path / "MagicMock").exists()

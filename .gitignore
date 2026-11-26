@@ -17,6 +17,9 @@ dist/
 build/
 *.egg-info/
 
+# 测试里把 MagicMock 当 data_dir 时, Path(mock) 会生成本地相对目录
+MagicMock/
+
 # ===== uv =====
 .uv/
 
