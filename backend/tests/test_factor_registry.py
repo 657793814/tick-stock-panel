@@ -82,6 +82,13 @@ GOLDEN_COLUMNS: list[dict] = [
     {"id": "revenue_yoy_latest", "label": "营收增速(最新公告)", "group": "财务", "desc": "最新已公告营业收入同比(%)"},
     {"id": "net_income_yoy_latest", "label": "净利增速(最新公告)", "group": "财务", "desc": "最新已公告归母净利润同比(%)"},
     {"id": "debt_ratio_latest", "label": "资产负债率(最新公告)", "group": "财务", "desc": "最新已公告资产负债率(%)"},
+    # --- 股东结构批次 (2026-11-28): 插于财务组之后, 前 48 项挖掘调度顺序不变 ---
+    {"id": "holder_num", "label": "股东户数(最新公告)", "group": "股东结构", "desc": "最新已披露股东户数(户); 户数下降通常代表筹码集中"},
+    {"id": "holder_num_chg", "label": "股东户数环比(最新公告)", "group": "股东结构", "desc": "相邻已披露报告期股东户数变化率(%)"},
+    {"id": "top10_hold_ratio", "label": "前十大股东持股比例", "group": "股东结构", "desc": "前十大股东合计持股比例(%)"},
+    {"id": "top10_flow_ratio", "label": "前十大流通股东持股比例", "group": "股东结构", "desc": "前十大流通股东合计持股比例(%)"},
+    {"id": "top10_hhi", "label": "前十大股东集中度", "group": "股东结构", "desc": "前十大股东持股比例平方和/10000, 0~1, 越高越集中"},
+    {"id": "top10_new_count", "label": "前十大新进家数", "group": "股东结构", "desc": "最新报告期前十大股东中新进家数(家)"},
     # --- 扩充批次 (2026-09-05): 追加于目录尾部, 前 48 项挖掘调度顺序不变 ---
     {"id": "log_float_mv", "label": "流通市值对数", "group": "规模", "desc": "ln(收盘价 x 当日成交量 / 换手率), 由换手率反推流通股本, 高值代表大盘"},
     {"id": "momentum_120d", "label": "120日动量", "group": "动量", "desc": "120个交易日累计收益率 (中期动量, 与短窗口互补)"},
@@ -99,6 +106,14 @@ GOLDEN_COLUMNS: list[dict] = [
     {"id": "position_240d", "label": "一年价格位置", "group": "价格位置", "desc": "收盘价在近240个交易日最低价到最高价之间的位置 (0~1)"},
     {"id": "distance_to_high_240d", "label": "距一年高点", "group": "价格位置", "desc": "收盘价 / 240日最高收盘价 - 1, 接近0代表贴近一年新高"},
     {"id": "kdj_kd_diff", "label": "KDJ K-D差", "group": "趋势", "desc": "KDJ K值 - D值, 正值代表快线在慢线上方"},
+    # --- 事件批次 (2026-11-28): 龙虎榜/两融, 追加于目录尾部 ---
+    {"id": "lhb_net_ratio", "label": "龙虎榜净买占比", "group": "龙虎榜", "desc": "龙虎榜净买入额 / 当日成交额, 未上榜为 0"},
+    {"id": "lhb_on_board", "label": "当日是否上榜", "group": "龙虎榜", "desc": "是否登上龙虎榜 (1/0), 事件型哑变量"},
+    {"id": "lhb_reason_count", "label": "上榜原因条数", "group": "龙虎榜", "desc": "当日触发上榜的异动原因条数, 反映异动强度"},
+    {"id": "margin_balance_ratio", "label": "融资余额占比", "group": "融资融券", "desc": "融资余额 / 流通市值(%), 杠杆资金存量强度"},
+    {"id": "margin_buy_ratio", "label": "融资买入占比", "group": "融资融券", "desc": "当日融资买入额 / 流通市值(%), 杠杆资金当日强度"},
+    {"id": "margin_net_5d_ratio", "label": "5日融资净买占比", "group": "融资融券", "desc": "近5日融资净买入额 / 流通市值(%), 杠杆资金边际方向"},
+    {"id": "margin_short_ratio", "label": "融券余额占比", "group": "融资融券", "desc": "融券余额 / 流通市值(%), 做空压力存量"},
 ]
 
 GOLDEN_VIRTUAL_DEPS: dict[str, frozenset[str]] = {
@@ -230,12 +245,12 @@ def test_scoring_warmup_snapshot() -> None:
 
 def test_catalog_counts_and_kinds() -> None:
     specs = all_factors()
-    assert len(specs) == 77
-    assert len({spec.id for spec in specs}) == 77  # id 唯一
+    assert len(specs) == 90
+    assert len({spec.id for spec in specs}) == 90  # id 唯一
     virtual = [spec for spec in specs if spec.kind == "virtual"]
     assert len(virtual) == 52  # ma/ema 10 + 原有 26 + 扩充批次 16
     financial = [spec for spec in specs if spec.pit]
-    assert len(financial) == 7
+    assert len(financial) == 20  # 财务 7 + 股东结构 6 + 龙虎榜 3 + 两融 4
     assert all(spec.pit_source == "financial_announce" for spec in financial)
     assert all(spec.asset_types == frozenset({"stock"}) for spec in financial)
 
@@ -261,8 +276,8 @@ def test_get_factor_and_dependencies() -> None:
 def test_asset_type_filter() -> None:
     stock = all_factors(asset_type="stock")
     etf = all_factors(asset_type="etf")
-    assert len(stock) == 77
-    assert len(etf) == 70  # 财务 7 项仅股票
+    assert len(stock) == 90
+    assert len(etf) == 70  # 财务/股东/事件 20 项仅股票
 
 
 def test_register_factor_rejects_duplicate() -> None:
@@ -309,7 +324,7 @@ def test_factors_api_contract() -> None:
     assert response.status_code == 200
     payload = response.json()
     factors = payload["factors"]
-    assert len(factors) == 77
+    assert len(factors) == 90
     first = factors[0]
     assert first["id"] == "momentum_5d"
     assert first["kind"] == "base"
@@ -321,6 +336,10 @@ def test_factors_api_contract() -> None:
     pb = next(item for item in factors if item["id"] == "pb_latest")
     assert pb["pit"] is True
     assert pb["asset_types"] == ["stock"]
+    # 事件批次 (2026-11-28): 龙虎榜/两融为点时因子, 仅股票
+    lhb = next(item for item in factors if item["id"] == "lhb_net_ratio")
+    assert lhb["pit"] is True and lhb["kind"] == "base"
+    assert lhb["asset_types"] == ["stock"]
     mv = next(item for item in factors if item["id"] == "log_float_mv")
     assert mv["kind"] == "virtual"
     assert mv["scale_free"] is False

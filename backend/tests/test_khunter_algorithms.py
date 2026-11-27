@@ -203,25 +203,29 @@ def test_moneyflow_secid_and_parse():
 def test_eastmoney_plugin_registered_in_loader():
     """插件被真实 loader 注册: available、origin=builtin。
 
-    moneyflow 属非路由数据集(参照 fuyao.dragon_tiger 项目约定), 不进清单 datasets
-    → 清单 datasets 为空列表。
+    事件类数据集 (moneyflow/lhb/margin) 已注册为能力路由槽位 → 清单 datasets
+    为这三项; 标准行情数据集不实现不声明。
     """
     from app.data_providers.custom import loader
     plugins = {p["name"]: p for p in loader.list_plugins()}
     em = plugins.get("eastmoney")
     assert em is not None, "eastmoney 未被 loader 注册"
     assert em["available"] is True
-    assert em["datasets"] == []
+    assert em["datasets"] == ["moneyflow", "lhb", "margin"]
     assert em["origin"] == "builtin"
 
 
 def test_eastmoney_provider_dataset_contract():
-    """非路由约定: config.datasets 为空 → provider_has_dataset 全 False(不抢路由)。
+    """数据集声明契约: 仅事件类数据集进能力路由, 标准行情数据集不声明。
 
+    moneyflow/lhb/margin 已注册为能力路由槽位 (默认路由 eastmoney) → True;
+    daily/realtime 等标准行情数据集不实现不声明 → False, 主流程回退 tickflow。
     消费契约 = provider 方法存在: get_provider("eastmoney").get_moneyflow 可调用。
     """
     from app.data_providers.custom import loader
-    for ds in ("daily", "realtime", "minute", "adj_factor", "financial", "moneyflow"):
+    for ds in ("moneyflow", "lhb", "margin"):
+        assert loader.provider_has_dataset("eastmoney", ds) is True
+    for ds in ("daily", "realtime", "minute", "adj_factor", "financial", "depth5", "full_minute"):
         assert loader.provider_has_dataset("eastmoney", ds) is False
     provider = loader.get_provider("eastmoney")
     assert callable(provider.get_moneyflow)
