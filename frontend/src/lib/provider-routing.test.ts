@@ -11,6 +11,9 @@ const CAPS: Pick<CapabilityRoute, 'id' | 'field'>[] = [
   { id: 'depth5', field: 'depth5_data_provider' },
   { id: 'financial', field: 'financial_data_provider' },
   { id: 'full_minute', field: 'full_minute_data_provider' },
+  { id: 'moneyflow', field: 'moneyflow_data_provider' },
+  { id: 'lhb', field: 'lhb_data_provider' },
+  { id: 'margin', field: 'margin_data_provider' },
 ]
 
 const ALL_FIELDS: ProviderField[] = [
@@ -21,6 +24,16 @@ const ALL_FIELDS: ProviderField[] = [
   'depth5_data_provider',
   'financial_data_provider',
   'full_minute_data_provider',
+  'moneyflow_data_provider',
+  'lhb_data_provider',
+  'margin_data_provider',
+]
+
+/** 事件类能力: TickFlow 不提供, 默认源 eastmoney (tf_provides=False)。 */
+const EVENT_FIELDS: ProviderField[] = [
+  'moneyflow_data_provider',
+  'lhb_data_provider',
+  'margin_data_provider',
 ]
 
 const DEMO = 'demo_source'
@@ -47,6 +60,9 @@ describe('buildProviderRouting', () => {
     )
     expect(routing.adj_factor_provider).toBe('tickflow')
     expect(routing.financial_data_provider).toBe('tickflow')
+    expect(routing.moneyflow_data_provider).toBe('eastmoney')
+    expect(routing.lhb_data_provider).toBe('eastmoney')
+    expect(routing.margin_data_provider).toBe('eastmoney')
   })
 
   it('每个可路由字段都被覆盖 (防止再漏能力)', () => {
@@ -81,8 +97,14 @@ describe('buildProviderRouting', () => {
     expect(Object.keys(routing).sort()).toEqual([...ALL_FIELDS].sort())
   })
 
-  it('默认路由覆盖全部字段且均为 tickflow', () => {
+  it('默认路由覆盖全部字段: 行情能力 tickflow, 事件类能力 eastmoney', () => {
     expect(Object.keys(DEFAULT_ROUTING).sort()).toEqual([...ALL_FIELDS].sort())
-    expect(new Set(Object.values(DEFAULT_ROUTING))).toEqual(new Set(['tickflow']))
+    for (const field of ALL_FIELDS) {
+      if (EVENT_FIELDS.includes(field)) {
+        expect(DEFAULT_ROUTING[field], `event field ${field}`).toBe('eastmoney')
+      } else {
+        expect(DEFAULT_ROUTING[field], `quote field ${field}`).toBe('tickflow')
+      }
+    }
   })
 })

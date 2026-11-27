@@ -546,15 +546,17 @@ class BacktestEngine:
             return df
 
         from app.backtest.fundamentals import (
-            load_fundamental_snapshot,
+            fundamental_tables,
+            load_fundamental_snapshots,
         )
 
         fundamental_names = sorted(
             getattr(feature_plan, "fundamental_columns", frozenset())
             or frozenset()
         )
-        financials = load_fundamental_snapshot(
+        financials = load_fundamental_snapshots(
             self.repo.store.data_dir if self.repo is not None else None,
+            fundamental_tables(fundamental_names),
         ) if fundamental_names else None
         instruments = (
             self.repo.get_instruments_asset(asset_type)
@@ -581,7 +583,8 @@ class BacktestEngine:
         if evidence is not None:
             evidence.capture_panel(df, prepare, {
                 "instruments": instruments, "historical_shares": historical_shares,
-                "financial_announcements": financials,
+                "financial_announcements": (financials or {}).get("metrics"),
+                "holder_announcements": (financials or {}).get("holder_metrics"),
             })
         return prepare(df)
 

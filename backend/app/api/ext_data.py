@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.market_time import CN_TZ, cn_today
 from app.services import ext_config_transfer
+from app.services.dimension_source import upstream_label
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
@@ -520,6 +521,8 @@ def list_configs(request: Request):
         d["date_range"] = _date_range(c, data_dir)
         d["plate"] = _plate_stats(c, data_dir)
         d["granularity_effective"] = _granularity_effective(c, data_dir)
+        # 上游展示名 (同花顺/东方财富/...): 由拉取地址反查, 供页面统一标注数据来源
+        d["source_label"] = upstream_label(c.pull.url if c.pull is not None else None)
         items.append(d)
     return {"items": items}
 

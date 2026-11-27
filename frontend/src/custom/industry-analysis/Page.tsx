@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
+import { SourceTag } from '@/components/SourceTag'
 import { MarketNotSupportedHint } from '@/components/MarketNotSupported'
 import { useMarket } from '@/lib/market'
 import { AnalysisConfigDialog, DimensionHeatmap, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
@@ -26,6 +27,7 @@ import { storage } from '@/lib/storage'
 import { fmtBigNum, fmtPct, priceColorClass } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { resolveDimension, type DimensionGroup, type StockRow } from '@/lib/analysis-adapter'
+import { upstreamLabel } from '@/lib/source-labels'
 import { SectorRotationCard } from '@/components/SectorRotationCard'
 
 const KEYWORDS = ['industry', '行业', 'sector', '申万', '中信']
@@ -304,6 +306,8 @@ export function IndustryAnalysis() {
   const preferredConfig = availableConfigs.find(c => c.id === preferredConfigId)
   const activeConfigId = preferredConfig ? preferredConfigId : pickBestConfig(availableConfigs)
   const activeConfig = availableConfigs.find(c => c.id === activeConfigId)
+  // 行业成分的来源随扩展表走: 默认内置预设是同花顺, 用户换自有源后标签同步变化
+  const boardSource = activeConfig?.source_label ?? upstreamLabel(activeConfig?.pull?.url) ?? '扩展数据'
 
   const rowsQuery = useQuery({
     queryKey: QK.extDataRows(activeConfigId, undefined, PAGE_LIMIT),
@@ -438,7 +442,13 @@ export function IndustryAnalysis() {
     <>
       <PageHeader
         title="行业板块"
-        subtitle={`${industryLevelLabel} · ${marketQuery.data?.as_of ?? rowsQuery.data?.date ?? '最新'} · ${stats.length} 个行业 · ${totalSymbols} 只标的`}
+        subtitle={`${industryLevelLabel} · ${marketQuery.data?.as_of ?? rowsQuery.data?.date ?? '最新'} · ${stats.length} 个行业 · ${totalSymbols} 只标的 · 成分 ${boardSource} · 行情 本地日线快照`}
+        titleExtra={(
+          <SourceTag
+            source={boardSource}
+            detail={`行业分类来自扩展表 ${activeConfig?.label ?? ''} (${activeConfig?.id ?? '—'})；同花顺行业名为「一级-二级」两段，三级视图回退到最末段；行情为本地 enriched 日线快照`}
+          />
+        )}
         right={
           <div className="flex items-center gap-1">
             {/* RPS 轮动: 打开行业涨幅轮动矩阵对话框 */}

@@ -365,18 +365,20 @@ def _allowed_data_providers() -> set[str]:
         return set(_ALLOWED_DATA_PROVIDERS)
 
 
-def _validated_provider(raw: str, pref_key: str) -> str:
-    """数据源偏好白名单校验。非法/已卸载的源回退 tickflow 并告警。
+def _validated_provider(raw: str, pref_key: str, fallback: str = "tickflow") -> str:
+    """数据源偏好白名单校验。非法/已卸载的源回退默认源并告警。
 
     静默回退曾让「配了 fuyao 却全程走免费档」无从排查 (fuyao 事件的
-    定位难点之一): 回退必须留痕。
+    定位难点之一): 回退必须留痕。默认回退 tickflow; 非行情事件能力
+    (moneyflow/lhb/margin, TickFlow 不提供) 经 ``_validated_event_provider``
+    回退各自默认源, 避免路由到永远不可用的源。
     """
     if raw in _allowed_data_providers():
         return raw
     logger.warning(
-        "数据源偏好 %s=%r 不在可用列表 %s, 回退 tickflow",
-        pref_key, raw, sorted(_allowed_data_providers()))
-    return "tickflow"
+        "数据源偏好 %s=%r 不在可用列表 %s, 回退 %s",
+        pref_key, raw, sorted(_allowed_data_providers()), fallback)
+    return fallback
 
 
 def get_daily_data_provider() -> str:
@@ -413,6 +415,42 @@ def get_realtime_data_provider() -> str:
 def get_financial_provider() -> str:
     provider = str(load().get("financial_data_provider", "tickflow") or "tickflow").lower()
     return _validated_provider(provider, "financial_data_provider")
+
+
+# ---- 事件类能力 (tf_provides=False): TickFlow 不提供, 默认/回退源为 eastmoney ----
+
+_EVENT_DEFAULT_PROVIDER = "eastmoney"
+
+
+def _validated_event_provider(raw: str, pref_key: str) -> str:
+    """事件类能力路由校验: eastmoney 恒合法 (能力默认源), 其余须已注册。
+
+    插件未加载时保留 eastmoney 偏好值 (矩阵据此给出 usable=False 的明确
+    不可用态), 而不是回退到永远提供不了该数据的 tickflow。
+    """
+    if raw == _EVENT_DEFAULT_PROVIDER or raw in _allowed_data_providers():
+        return raw
+    logger.warning(
+        "数据源偏好 %s=%r 不在可用列表 %s, 回退 %s",
+        pref_key, raw, sorted(_allowed_data_providers()), _EVENT_DEFAULT_PROVIDER)
+    return _EVENT_DEFAULT_PROVIDER
+
+
+def _get_event_provider(pref_key: str) -> str:
+    provider = str(load().get(pref_key, _EVENT_DEFAULT_PROVIDER) or _EVENT_DEFAULT_PROVIDER).lower()
+    return _validated_event_provider(provider, pref_key)
+
+
+def get_moneyflow_data_provider() -> str:
+    return _get_event_provider("moneyflow_data_provider")
+
+
+def get_lhb_data_provider() -> str:
+    return _get_event_provider("lhb_data_provider")
+
+
+def get_margin_data_provider() -> str:
+    return _get_event_provider("margin_data_provider")
 
 
 # ===== 盘后管道拉取内容开关 (A股 / ETF / 指数 独立控制) =====

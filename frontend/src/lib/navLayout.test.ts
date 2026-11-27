@@ -15,6 +15,11 @@ describe('nav layout', () => {
     const result = resolveNavLayout(null, entries, ['auction', '/watchlist', 'auction', '/', '/settings'])
     expect(result.items.map(x => x.id)).toEqual(['/', '/analysis/auction', '/watchlist', '/screener'])
   })
+  it('places an extension page with explicit order right after the dashboard', () => {
+    const withNews = [...entries, { id: '/news', order: 0.5, visible: true }]
+    const result = resolveNavLayout(null, withNews)
+    expect(result.items.map(x => x.id)).toEqual(['/', '/news', '/watchlist', '/screener', '/analysis/auction'])
+  })
   it.each([false, true])('omits fixed settings from saved layouts (nested: %s) while retaining other pages', nested => {
     const settings = { type: 'page' as const, id: '/settings' }
     const saved: NavLayout = { v: 1, items: [

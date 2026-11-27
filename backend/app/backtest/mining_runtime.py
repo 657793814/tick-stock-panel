@@ -25,7 +25,8 @@ from app.backtest.factor import (
 from app.backtest.fundamentals import (
     FUNDAMENTAL_FACTOR_NAMES,
     attach_fundamental_factors,
-    load_fundamental_snapshot,
+    fundamental_tables,
+    load_fundamental_snapshots,
 )
 from app.backtest.mining import (
     MAX_FINALISTS,
@@ -372,7 +373,7 @@ def _load_compact_factor_panel(
         )
         raw = attach_fundamental_factors(
             raw,
-            load_fundamental_snapshot(data_dir),
+            load_fundamental_snapshots(data_dir, fundamental_tables(fundamental_names)),
             fundamental_names,
         )
 

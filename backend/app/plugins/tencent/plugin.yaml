@@ -1,0 +1,30 @@
+# Tencent — 腾讯公开行情接口 (免注册 / 免 token)
+# 分钟 K 来自 ifzq.gtimg.cn mkline (m1 约 2 交易日, 上游不支持日期范围);
+# 实时/五档来自 qt.gtimg.cn (GBK, 批量 ≤50 只/请求, 无法枚举全市场);
+# 日K 来自 ifzq fqkline (不复权, 单标的 count 模式, 实测 ≤700 根)。
+# 公开接口无 SLA, provider 逐批/逐标的节流且失败 fail-closed, 不静默跨源。
+
+name: tencent
+display_name: "腾讯行情"
+runtime: none
+entry: app.plugins.tencent.provider:TencentProvider
+check: app.plugins.tencent.provider:availability
+datasets: [minute, realtime, depth5, daily]
+description: |
+  腾讯免费公开行情接口, 无需注册和 token。路由能力:
+  - 分钟 K (m1, 单标的拉取): 实测每次约 482 根 (≈2 交易日), 上游不接受日期范围参数,
+    逐日增量落盘可累积历史;
+  - 实时快照 / 五档盘口 (qt.gtimg.cn, 批量 ≤50 只/请求): 按标的列表拉取, 上游无法
+    枚举全市场标的 — get_realtime() 不带标的列表时明确报错, 全市场快照轮询请路由到
+    可枚举的源; 自选补拉、指数快照与五档按需拉取正常可用;
+  - 日 K (不复权, 单标的 count 模式): 与除权因子管线口径对齐, 全市场一轮 5600+ 请求,
+    适合增量与小池子, 深回填耗时长。
+  分时/前复权日 K 通过 /api 按需直取, 不作为路由数据集。
+install_hint: "无需配置; 在 设置 → 数据源 的能力路由中选择「腾讯行情」即可启用对应能力"
+homepage: "https://gu.qq.com"
+usage_notes:
+  - "分钟K: m1 约 2 交易日深度, 逐标的拉取并节流, 适合日常增量与近两日分时"
+  - "不适合一次性回补长历史: 上游 mkline 不支持指定起止日期"
+  - "实时/五档: 批量 ≤50 只/请求, 按标的列表拉取; 无法枚举全市场, 全市场快照轮询不可用"
+  - "日K: 不复权, 单标的 count 模式 (≤700 根); 全市场增量可行, 深回填逐标的耗时长"
+  - "公开接口无服务等级承诺, 失败时该源不可用, 不静默回退其它数据源"

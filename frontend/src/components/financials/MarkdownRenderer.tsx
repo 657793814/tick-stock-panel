@@ -121,6 +121,24 @@ function parseTable(lines: string[], start: number): { rows: string[][]; consume
 
 // ===== 主渲染 =====
 
+/** 软换行拼接: CJK 边界直接相连 (中文不留空格), 其余按英文习惯补一个空格。 */
+function joinSoftLines(parts: string[]): string {
+  const cjk = (ch: string | undefined) => !!ch && /[\u2E80-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/.test(ch)
+  return parts.reduce((acc, cur) => {
+    if (!acc) return cur
+    return acc + (cjk(acc.slice(-1)) || cjk(cur[0]) ? '' : ' ') + cur
+  }, '')
+}
+
+/** 列表项续行判定: 缩进的普通行 (YAML | 块折行 / markdown 列表项续行)。 */
+function isItemContinuation(raw: string): boolean {
+  const trimmed = raw.trim()
+  if (!trimmed || !/^\s+\S/.test(raw)) return false
+  // 块级结构开头不算续行
+  return !trimmed.startsWith('|') && !trimmed.startsWith('>') &&
+    !/^(#{1,4}\s|[-*]\s|\d+\.\s)/.test(trimmed) && !/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)
+}
+
 export function MarkdownRenderer({ content, compact = false }: { content: string; compact?: boolean }) {
   const lines = content.replace(/\r\n/g, '\n').split('\n')
   const blocks: ReactNode[] = []
@@ -231,8 +249,15 @@ export function MarkdownRenderer({ content, compact = false }: { content: string
     if (/^[-*]\s+/.test(trimmed)) {
       const items: string[] = []
       while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*[-*]\s+/, ''))
+        let item = lines[i].replace(/^\s*[-*]\s+/, '')
         i++
+        // 吸收缩进续行, 折行的长条目不再断成短行
+        const cont: string[] = []
+        while (i < lines.length && isItemContinuation(lines[i])) {
+          cont.push(lines[i].trim())
+          i++
+        }
+        items.push(joinSoftLines([item, ...cont]))
       }
       blocks.push(
         <ul key={key++} className="my-4 space-y-2">
@@ -251,8 +276,15 @@ export function MarkdownRenderer({ content, compact = false }: { content: string
     if (/^\d+\.\s+/.test(trimmed)) {
       const items: string[] = []
       while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*\d+\.\s+/, ''))
+        let item = lines[i].replace(/^\s*\d+\.\s+/, '')
         i++
+        // 吸收缩进续行, 与无序列表口径一致
+        const cont: string[] = []
+        while (i < lines.length && isItemContinuation(lines[i])) {
+          cont.push(lines[i].trim())
+          i++
+        }
+        items.push(joinSoftLines([item, ...cont]))
       }
       blocks.push(
         <ol key={key++} className="my-4 space-y-2">
@@ -269,13 +301,26 @@ export function MarkdownRenderer({ content, compact = false }: { content: string
       continue
     }
 
-    // 普通段落
+    // 普通段落 — 连续非空普通行合并为同一段 (标准 Markdown 软换行语义)。
+    // YAML | 块按源码宽度折行的长描述 (插件 manifest 等) 不再被拆成一堆短行,
+    // 避免宽容器下每行右侧大片留白。
+    const paraLines = [trimmed]
+    i++
+    while (i < lines.length) {
+      const nxt = lines[i].trim()
+      // 遇到块级结构 (空行/标题/列表/引用/表格/分隔线) 即断段
+      if (!nxt || nxt.startsWith('|') || nxt.startsWith('>') ||
+          /^(#{1,4}\s|[-*]\s|\d+\.\s)/.test(nxt) || /^(-{3,}|\*{3,}|_{3,})$/.test(nxt)) break
+      paraLines.push(nxt)
+      i++
+    }
+    // 拼接复用列表续行同一口径 (CJK 边界直接相连)
+    const paraText = joinSoftLines(paraLines)
     blocks.push(
       <p key={key++} className="my-3 text-sm text-foreground leading-relaxed">
-        {renderInline(trimmed, `p-${key}`)}
+        {renderInline(paraText, `p-${key}`)}
       </p>,
     )
-    i++
   }
 
   // 注意:外层不加 space-y-*,否则会覆盖各块自己的 margin-top 导致间距失效。

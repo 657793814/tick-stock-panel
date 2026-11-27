@@ -55,6 +55,9 @@ const DATASET_LABEL: Record<string, string> = {
   depth5: '五档',
   financial: '财务',
   full_minute: '全量分钟',
+  moneyflow: '资金流',
+  lhb: '龙虎榜',
+  margin: '两融',
 }
 
 /** 能力图标 (纯展示; 能力清单本身由后端注册表驱动) */
@@ -597,7 +600,7 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
 
   const selectedCustom = customList.find(s => s.name === selected)
 
-  // ===== 各能力当前的有效提供方 (除权 same_as_daily = 跟随日K) =====
+  // ===== 各能力当前的有效提供方 (事件类能力默认 eastmoney, 非 tickflow) =====
   // 用于能力芯片"服务中"态与详情卡标识: 路由切换在上方能力路由区, 这里只读展示
   const dailyPref = prefs.data?.daily_data_provider || 'tickflow'
   const adjPref = prefs.data?.adj_factor_provider || 'same_as_daily'
@@ -609,6 +612,9 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
     realtime: prefs.data?.realtime_data_provider || 'tickflow',
     depth5: prefs.data?.depth5_data_provider || 'tickflow',
     financial: prefs.data?.financial_data_provider || 'tickflow',
+    moneyflow: prefs.data?.moneyflow_data_provider || 'eastmoney',
+    lhb: prefs.data?.lhb_data_provider || 'eastmoney',
+    margin: prefs.data?.margin_data_provider || 'eastmoney',
   }
   const servingDatasets = (name: string) =>
     Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)

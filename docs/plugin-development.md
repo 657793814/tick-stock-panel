@@ -32,7 +32,8 @@ display_name: "我的数据源"                 # 设置页显示名
 runtime: none                            # 运行时类型: node | python | none
 entry: app.plugins.my_source.provider:MyProvider   # provider 类的导入路径
 check: app.plugins.my_source.bridge:availability   # 可用性检测函数(可选)
-datasets: [realtime]                     # 支持: daily/adj_factor/minute/realtime/depth5/financial
+datasets: [realtime]                     # 行情能力: daily/adj_factor/minute/realtime/depth5/financial/full_minute
+                                         # 事件能力: moneyflow/lhb/margin (TickFlow 不提供, 默认路由 eastmoney)
 api_key_env: MY_SOURCE_API_KEY           # (可选)声明后设置页提供 Key 输入框
 hidden: false                            # (可选)true = 已加载但对设置页隐藏,不注册不展示
 description: |
@@ -56,6 +57,15 @@ key_manage_label: "获取 Key / 查看用量"    # (可选)缺省为「管理 Ke
 
 只声明真实提供的数据集;未声明的数据集 `provider_has_dataset` 返回 False,自动回退
 TickFlow。不要声明做不了的数据集(粒度含义见下文"能力声明的粒度")。
+
+> **事件类数据集 (moneyflow / lhb / margin) 契约**:这三类已注册为能力路由槽位
+> (`tf_provides: false`,TickFlow 不提供,默认路由 eastmoney)。插件声明同名数据集
+> 即成为对应能力的候选源。注意取数形态差异:moneyflow 是「逐标的」维度(可对照
+> eastmoney 插件的 `get_moneyflow(symbols)` provider 方法);lhb / margin 是
+> 「按日全市场」维度(参照 `services/eastmoney_sync.py`,单日全市场一次请求落
+> `data/financials/`),与 provider 按 symbols 批量的契约不匹配,当前无 provider
+> 方法形态——新增此类候选源前先确认消费方的取数形态。各页面真实数据来源见
+> [页面数据来源地图](data-source-map.md)。
 
 #### api_key_env(界面配置 API Key)
 

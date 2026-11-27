@@ -2,21 +2,26 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
+from app.services import ai_reports, holder_sync
 from app.services.financial_analyzer import analyze_financials_stream
-from app.services import ai_reports
+from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
 from app.services.ndjson_heartbeat import with_heartbeat
 from app.tickflow.capabilities import Cap
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/financials", tags=["financials"])
+
+# 股东结构同步状态 (仅内存, 进程重启后归零; 数据一致性由落盘文件保证)
+_holder_sync_lock = threading.Lock()
+_holder_sync_state: dict = {"running": False, "rows": 0, "error": None}
 
 
 def _financial_allowed(capset) -> bool:
@@ -61,13 +66,29 @@ def financial_status(request: Request):
     fs = getattr(request.app.state, "financial_scheduler", None)
     last_sync = fs.last_sync if fs else {}
 
+    # 股东结构为 XTick 独有数据, 单独统计 (不在 FINANCIAL_TABLES 内)
+    holder_path = holder_sync.table_path(data_dir)
+    tables["holder_metrics"] = {"rows": 0, "symbols": 0}
+    if holder_path.exists():
+        try:
+            holder = holder_sync.load_holder_metrics(data_dir)
+            if not holder.is_empty() and "symbol" in holder.columns:
+                tables["holder_metrics"] = {
+                    "rows": len(holder),
+                    "symbols": holder["symbol"].n_unique(),
+                }
+        except Exception:  # noqa: BLE001 — 状态统计失败只影响展示
+            pass
+
     return {
         "available": True,
         "tables": tables,
         "last_sync": last_sync,
         # 服务端是否正在同步(手动触发)——前端据此显示"同步中"并防重复点击,
         # 且刷新页面后仍能正确反映服务端状态。
-        "syncing": bool(fs and fs.is_syncing),
+        "syncing": bool(
+            (fs and fs.is_syncing) or _holder_sync_state["running"]
+        ),
     }
 
 
@@ -139,6 +160,46 @@ def get_shares(request: Request, symbol: str | None = None):
     if symbol:
         df = df.filter(pl.col("symbol") == symbol)
     return {"data": df.to_dicts()}
+
+
+@router.get("/holder-metrics")
+def get_holder_metrics(request: Request, symbol: str | None = None):
+    """查询股东结构宽表 (十大股东/流通股东/股东户数聚合)。"""
+    capset = request.app.state.capabilities
+    _require_financial(capset)
+
+    df = holder_sync.load_holder_metrics(request.app.state.repo.store.data_dir)
+    if df.is_empty():
+        return {"data": []}
+    if symbol:
+        df = df.filter(pl.col("symbol") == symbol)
+    return {"data": df.to_dicts()}
+
+
+@router.post("/sync/holder-metrics")
+def sync_holder_metrics(request: Request, limit: int | None = None):
+    """手动触发股东结构同步 (后台线程, 逐股 3 次请求, 全市场约 30~60 分钟)。"""
+    capset = request.app.state.capabilities
+    _require_financial(capset)
+
+    if not _holder_sync_lock.acquire(blocking=False):
+        return {"status": "running", "message": "股东数据同步已在进行"}
+    data_dir = request.app.state.repo.store.data_dir
+
+    def _run() -> None:
+        _holder_sync_state.update(running=True, rows=0, error=None)
+        try:
+            rows = holder_sync.sync_holder_metrics(data_dir, limit=limit)
+            _holder_sync_state["rows"] = rows
+        except Exception as exc:  # noqa: BLE001 — 后台线程必须自吞异常
+            logger.warning("股东数据同步失败: %s", exc)
+            _holder_sync_state["error"] = type(exc).__name__
+        finally:
+            _holder_sync_state["running"] = False
+            _holder_sync_lock.release()
+
+    threading.Thread(target=_run, name="holder-metrics-sync", daemon=True).start()
+    return {"status": "started"}
 
 
 @router.post("/sync/{table}")

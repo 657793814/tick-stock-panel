@@ -437,7 +437,7 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
     },
     {
       name: 'fuyao',
-      display: fyPlugin?.display_name || 'fuyao',
+      display: fyPlugin?.display_name || '同花顺',
       env: fyPlugin?.api_key_env || 'FUYAO_API_KEY',
       datasets: fyPlugin?.datasets ?? [],
       icon: { Comp: Landmark, cls: 'bg-bear/10 text-bear' },
@@ -678,7 +678,7 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
 // 自动路由的默认优先级 (前者可用的能力优先归前者)
 const ROUTE_PRIORITY = [
   { name: 'tickflow', display: 'TickFlow' },
-  { name: 'fuyao', display: 'fuyao' },
+  { name: 'fuyao', display: '同花顺' },
 ]
 
 function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {

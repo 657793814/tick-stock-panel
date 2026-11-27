@@ -1,0 +1,37 @@
+# XTick — 股票实时数据 API 插件 (http://api.xtick.top)
+# token 走 query string; 上游未提供 HTTPS (实测 HTTPS 返回 404), 请勿在共享网络使用。
+# 需在设置页或 .env 配置 XTICK_API_KEY, 未配置时插件灰显不可切换。
+
+name: xtick
+display_name: "XTick"
+runtime: none
+entry: app.plugins.xtick.provider:XTickProvider
+check: app.plugins.xtick.provider:availability
+datasets: [realtime, depth5, financial, daily, minute, full_minute, moneyflow]
+api_key_env: XTICK_API_KEY
+description: |
+  XTick 行情数据源。路由数据集: **实时快照**(全市场单请求)、**五档盘口**(≤50只/批)、
+  **财务数据**(/doc/gaap + /doc/capital)、**日K**(通用K线 /doc/kline/market, 不复权,
+  单标的日期范围)、**分钟K**(通用K线 period=1m, 单标的按日)、**全量分钟**
+  (/doc/order/minute **批量端点** ≤50只/请求, 全市场一轮 ≈112 请求; 批量解析 0 行时
+  自动回退单标的 1m K线)、**资金流**(/doc/hot/historymoney 单标的区间, 映射东财
+  moneyflow 归一 schema; 占比上游未提供 → 空值)。
+  十大股东/十大流通股东/股东户数为专用能力, 可同步为股东结构因子。
+  ⚠️ daily/minute/full_minute/moneyflow 的行结构与单位依据官方 Java SDK bean 与
+  前端列定义推定, **未经真实 Token 实测**; 本仓库维护者此前实测 /doc/core/batchkline
+  成交量与成交额为常规日 K 的 2 倍 (上游口径异常), 该端点不使用。配置 Token 后请先
+  在设置页对上述数据集「试拉」, 与本地日K对照核验 volume(手)/amount(元) 后再回填。
+  龙虎榜上游为席位明细口径, 与项目 lhb_metrics 因子表口径不同, 未注册路由。
+  上游 token 通过 URL query 传输且仅支持 HTTP, 请注意网络环境。
+install_hint: "在下方输入框填写 XTick Token(www.xtick.top 个人中心),或配置环境变量 XTICK_API_KEY"
+homepage: "http://www.xtick.top"
+key_manage_url: "http://www.xtick.top/user/account"
+usage_notes:
+  - "实时快照: 全市场一次请求(量化因子接口), 盘中 2-3 秒更新。"
+  - "五档盘口: 单次最多 50 只, 不支持 all。"
+  - "日K: 单标的日期范围 (fq=1 不复权); 全市场深回填逐标的耗时长, 优先增量。"
+  - "全量分钟: 批量分钟端点 ≤50 只/请求; 行结构未实测, 先「试拉」核验后再启用。"
+  - "资金流: 单标的区间; most/big/small → 超大/大/小单, 占比为空; 未实测, 先试拉。"
+  - "财务数据: 财务指标(2007 起)与股本表, 单标的逐股拉取; 三大报表不提供。"
+  - "股东结构: 十大股东/十大流通股东/股东户数(2001 起), 同步后可作为选股因子。"
+  - "竞价/连板/情绪/龙虎榜/新闻: 非路由能力, 见 XTick 扩展页。"

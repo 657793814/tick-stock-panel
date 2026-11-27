@@ -1382,7 +1382,8 @@ html:not(.dark) .tf-neon-main::before { opacity: 0.5; }
   box-shadow: inset 0 0 16px -8px hsl(var(--accent) / 0.9);
 }
 .tf-engine-state.is-paused,
-.tf-engine-state.is-blocked {
+.tf-engine-state.is-blocked,
+.tf-engine-state.is-legacy {
   color: hsl(var(--warning));
   border-color: hsl(var(--warning) / 0.4);
   background: hsl(var(--warning) / 0.09);

@@ -1,4 +1,20 @@
-import { compareByDefaultNav, defaultNavIndex } from './navOrder'
+import { defaultNavIndex } from './navOrder'
+
+type NavEntry = { id: string; order?: number }
+
+/** 显式 order 优先; 允许用小数插在两项之间（如 0.5 = 看板与自选之间）。 */
+function navEntryIndex(entry: NavEntry): number {
+  return typeof entry.order === 'number' && Number.isFinite(entry.order)
+    ? entry.order
+    : defaultNavIndex(entry.id)
+}
+
+function compareNavEntries(a: NavEntry, b: NavEntry): number {
+  const ia = navEntryIndex(a)
+  const ib = navEntryIndex(b)
+  if (ia === ib) return 0
+  return ia - ib
+}
 
 export type NavPage = { type: 'page'; id: string }
 export type NavGroup = { type: 'group'; id: string; label: string; children: NavPage[] }
@@ -10,10 +26,11 @@ export const navPageIds = (node: NavNode) => node.type === 'group' ? node.childr
 
 /** 保留离线插件引用，运行时显隐另行过滤；新页面补在顶层。 */
 export function resolveNavLayout(
-  layout: NavLayout | null | undefined, entries: readonly { id: string }[], legacyOrder: readonly string[] = [],
+  layout: NavLayout | null | undefined, entries: readonly NavEntry[], legacyOrder: readonly string[] = [],
 ): NavLayout {
   // 设置由侧栏底部固定入口承载，兼容忽略旧布局里的可移动引用。
   const seen = new Set<string>(['/', '/settings'])
+  const indexById = new Map(entries.map(entry => [entry.id, navEntryIndex(entry)]))
   const items: NavNode[] = []
   if (layout?.v === 1 && Array.isArray(layout.items)) {
     for (const node of layout.items) {
@@ -37,16 +54,16 @@ export function resolveNavLayout(
       items.push({ type: 'page', id })
     }
   }
-  const missing = entries.filter(x => !seen.has(x.id)).sort((a, b) => compareByDefaultNav(a.id, b.id))
+  const missing = entries.filter(x => !seen.has(x.id)).sort(compareNavEntries)
   for (const entry of missing) {
     if (seen.has(entry.id)) continue
     const node: NavPage = { type: 'page', id: entry.id }
     // 已分组时只在顶层追加；旧平铺配置沿用默认位置补齐规则。
-    const di = defaultNavIndex(entry.id)
+    const di = indexById.get(entry.id) ?? defaultNavIndex(entry.id)
     let anchor = -1
     if (!layout && Number.isFinite(di)) {
       for (let i = di - 1; i >= 0 && anchor < 0; i--) {
-        anchor = items.findIndex(x => x.type === 'page' && defaultNavIndex(x.id) === i)
+        anchor = items.findIndex(x => x.type === 'page' && (indexById.get(x.id) ?? defaultNavIndex(x.id)) === i)
       }
     }
     if (anchor >= 0) items.splice(anchor + 1, 0, node)

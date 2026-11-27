@@ -5,15 +5,21 @@
                 归一化列: symbol/date/main_net/super_large_net/large_net/small_net/
                 main_rate/large_rate/small_rate。净额单位元(正=净流入), 占比为百分数数值。
 
-设计边界(重要, 见 docs/khunter-integration-plan.md §6.3/§7):
-  - moneyflow 属非路由数据集(能力路由 CAPABILITY_REGISTRY 无对应槽位), 按项目
-    约定(参照 fuyao.dragon_tiger 的 docstring 声明)**不进 plugin.yaml datasets**,
-    本 provider 的 config.datasets 亦不声明 → provider_has_dataset 对所有数据集
-    返回 False, 不干扰能力路由; 消费方经 custom.loader.get_provider("eastmoney")
-    直取 get_moneyflow()。落因子由 scripts/ingest_moneyflow_factors.py 负责。
-  - 资金流的消费方是 ext_data 因子通道(timeseries + T-1 防前视), 不进 kline
-    同步主链路。
-  - 标准数据集(daily/realtime 等)不实现不声明 → 主流程自动回退 tickflow。
+设计边界(见 docs/khunter-integration-plan.md §6.3/§7):
+  - moneyflow 是「逐标的」维度, provider 方法 get_moneyflow() 是唯一数据集级入口,
+    消费方经 custom.loader.get_provider("eastmoney") 直取; 落因子由
+    scripts/ingest_moneyflow_factors.py 负责, 走 ext_data 因子通道
+    (timeseries + T-1 防前视), 不进 kline 同步主链路。
+  - moneyflow/lhb/margin 已注册为能力路由槽位 (tf_provides=False, 默认路由
+    eastmoney): plugin.yaml datasets 与本 config.datasets 均声明三项, 使
+    provider_has_dataset 与能力矩阵一致。标准行情数据集(daily/realtime 等)
+    不实现不声明 → 主流程自动回退 tickflow。
+
+龙虎榜 / 融资融券 (日频事件) 不走 provider 方法: 它们是"按日全市场"维度, 由
+``services/eastmoney_sync.py`` 直接调用 ``client.fetch_lhb_day/fetch_margin_day``
+并落 ``data/financials/{lhb_metrics,margin_metrics}``; 之所以不做成 provider 方法,
+是因为 provider 的契约是按 symbols 批量取数, 与"全市场一天一次"的取数形态不匹配。
+datasets 里声明 lhb/margin 仅为接入能力路由矩阵 (展示与门控), 不改变取数形态。
 """
 from __future__ import annotations
 
@@ -32,13 +38,17 @@ _THROTTLE_S = 1.2
 
 @dataclass(frozen=True)
 class _EastmoneyConfig:
-    """对齐 custom 源约定: provider.config.datasets 仅列可路由数据集。
+    """对齐 custom 源约定: provider.config.datasets 列可路由数据集。
 
-    moneyflow 非路由(参照 fuyao.dragon_tiger 约定), 故留空 —— 与 plugin.yaml
-    datasets: [] 保持一致。
+    moneyflow/lhb/margin 均已注册为能力路由槽位 (tf_provides=False), 与
+    plugin.yaml datasets: [moneyflow, lhb, margin] 保持一致 —— lhb/margin 无
+    provider 方法 (按日全市场形态, 见模块 docstring), 声明仅为能力矩阵与
+    provider_has_dataset 口径统一。
     """
 
-    datasets: dict = field(default_factory=dict)
+    datasets: dict = field(
+        default_factory=lambda: dict.fromkeys(("moneyflow", "lhb", "margin"))
+    )
 
 
 class EastmoneyProvider:

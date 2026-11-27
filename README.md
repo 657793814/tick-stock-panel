@@ -631,6 +631,7 @@ PORT=3018                      # 服务端口
 | [自定义数据源](./docs/custom-data-source.md) | 自定义数据源接入、能力路由契约、YAML 配置与 mock 联调示例 |
 | [数据源插件开发](./docs/plugin-development.md) | 数据源插件开发规范(以 fuyao 为参考实现) |
 | [外部数据源插件安装](./docs/external-data-source-packages.md) | ZIP 安装、Key 配置、版本维护和开发模板 |
+| [第三方数据源整合](./docs/third-party-data-source-integration.md) | 腾讯分K / XTick / 东方财富接入方案:接口实测、能力边界、财务·股东·龙虎榜·两融因子化、字段口径、安全边界与升级复核 |
 | [二次开发指南](./docs/secondary-development.md) | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板 |
 | [本仓库二开基线](./docs/secondary-development.md#0-本仓库二开基线) | fork 起点、已做改动、与上游的版本关系及升级复核清单 |
 | [页面 SDK](./docs/page-sdk.md) | 页面插件开发指南:产物契约、能力桥 ctx、打包与上传、安全边界 |

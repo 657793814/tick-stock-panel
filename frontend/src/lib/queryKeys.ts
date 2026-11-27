@@ -169,12 +169,37 @@ export const QK = {
   paperTrades:          (acc: string) => ['paper', 'trades', acc] as const,
   paperReplaySymbols:   (acc: string) => ['paper', 'replay-symbols', acc] as const,
   paperReplay:          (acc: string, symbol: string) => ['paper', 'replay', acc, symbol] as const,
+  paperReplayRound:      (acc: string, round: { symbol: string; open_date: string; close_date: string }) => ['paper', 'replay-round', acc, round.symbol, round.open_date, round.close_date] as const,
   paperNav:             (acc: string) => ['paper', 'nav', acc] as const,
   paperStats:           (acc: string) => ['paper', 'stats', acc] as const,
   paperRounds:          (acc: string) => ['paper', 'rounds', acc] as const,
   paperCompare:         ['paper', 'compare'] as const,
   paperAutoRules:       (acc: string) => ['paper', 'auto-rules', acc] as const,
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
+
+  // 新闻资讯 (fuyao 专有; 所有影响结果的入参进键)
+  newsStatus:           ['news-status'] as const,
+  newsArticle:          (clientType: string, seq: string) => ['news-article', clientType, seq] as const,
+  newsEvents:           (params: Record<string, string | number | undefined>) =>
+                          ['news-events', params] as const,
+  newsFlash:            (tagId: number, seq: string) => ['news-flash', tagId, seq] as const,
+  newsNotice:           (seq: string) => ['news-notice', seq] as const,
+  newsTopics:           (tabId: number, cursor: string | undefined, limit: number, importantOnly: boolean) =>
+                          ['news-topics', tabId, cursor ?? '', limit, importantOnly] as const,
+  newsAnomaly:          (begin: string, end: string, thscode?: string) =>
+                          ['news-anomaly', begin, end, thscode ?? ''] as const,
+  newsTimeline:         (thscode: string, offset: string, size?: number) =>
+                          ['news-timeline', thscode, offset, size ?? 0] as const,
+
+  // XTick 专用能力
+  xtickStatus:          ['xtick-status'] as const,
+  xtickData:            (kind: string, params: Record<string, string | number | boolean | undefined>) =>
+                          ['xtick-data', kind, params] as const,
+
+  // 东方财富日频事件 (龙虎榜/融资融券)
+  eastmoneyStatus:      ['eastmoney-status'] as const,
+  eastmoneyData:        (table: string, params: Record<string, string | number | undefined>) =>
+                          ['eastmoney-data', table, params] as const,
 
   // AI 大盘复盘
   reviewReports:        ['review-reports'] as const,

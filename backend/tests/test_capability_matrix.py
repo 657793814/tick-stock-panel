@@ -21,6 +21,9 @@ DEFAULT_CURRENT = {
     "depth5_data_provider": "tickflow",
     "realtime_data_provider": "tickflow",
     "financial_data_provider": "tickflow",
+    "moneyflow_data_provider": "eastmoney",
+    "lhb_data_provider": "eastmoney",
+    "margin_data_provider": "eastmoney",
 }
 
 
@@ -41,23 +44,72 @@ def test_registry_covers_all_routing_fields():
     assert len(set(routable)) == len(routable)
     assert {c["id"] for c in CAPABILITY_REGISTRY} == {
         "realtime", "daily", "minute", "full_minute", "depth5", "adj_factor", "financial",
+        "moneyflow", "lhb", "margin",
     }
     full_minute = next(c for c in CAPABILITY_REGISTRY if c["id"] == "full_minute")
     assert full_minute["field"] == "full_minute_data_provider"
     assert full_minute["tf_tier"] == "expert"
     for cap in CAPABILITY_REGISTRY:
-        assert cap["default"] == "tickflow"
+        # 事件类能力 (tf_provides=False) 默认源非 tickflow, 其余默认 tickflow
+        if cap.get("tf_provides", True):
+            assert cap["default"] == "tickflow"
+        else:
+            assert cap["default"] != "tickflow"
         assert cap["tf_tier"] in ("none", "starter", "pro", "expert")
         assert "follow" not in cap
 
 
+def test_event_capabilities_never_route_tickflow(monkeypatch):
+    """事件类能力 (moneyflow/lhb/margin): TickFlow 不提供, 任何档位都不进候选。
+
+    eastmoney 插件可用 → 唯一候选且 usable; 未加载 → pending + usable=False
+    (fail-visible), 偏好仍保留 eastmoney 不漂移。
+    """
+    _fake_sources(monkeypatch, [])
+    caps = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="expert"))
+    for cap_id in ("moneyflow", "lhb", "margin"):
+        cap = caps[cap_id]
+        assert cap["tf_available"] is False
+        assert cap["current"] == cap["effective"] == "eastmoney"
+        assert cap["candidates"] == []
+        assert cap["usable"] is False
+    _fake_sources(
+        monkeypatch,
+        [{"name": "eastmoney", "display_name": "东方财富", "datasets": ["moneyflow", "lhb", "margin"],
+          "available": True, "status": "ok"}],
+    )
+    caps = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="none"))
+    for cap_id in ("moneyflow", "lhb", "margin"):
+        cap = caps[cap_id]
+        assert [c["name"] for c in cap["candidates"]] == ["eastmoney"]
+        assert cap["candidates"][0]["kind"] == "plugin"
+        assert cap["tf_available"] is False
+        assert cap["usable"] is True
+    _fake_sources(
+        monkeypatch,
+        [{"name": "eastmoney", "display_name": "东方财富", "datasets": ["moneyflow", "lhb", "margin"],
+          "available": False, "status": "加载失败"}],
+    )
+    caps = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="none"))
+    for cap_id in ("moneyflow", "lhb", "margin"):
+        cap = caps[cap_id]
+        assert [c["name"] for c in cap["pending"]] == ["eastmoney"]
+        assert cap["pending"][0]["note"] == "加载失败"
+        assert cap["usable"] is False
+
+
 def test_matrix_without_third_party_sources(monkeypatch):
-    """无插件无自定义源: 每个能力只剩 TickFlow 候选, 默认路由全部生效。"""
+    """无插件无自定义源: 行情能力只剩 TickFlow 候选, 默认路由全部生效;
+    事件类能力 TickFlow 不提供 → 无候选且不可用 (eastmoney 未加载)。"""
     _fake_sources(monkeypatch, [])
     matrix = build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="expert")
     assert matrix["tickflow_tier"] == "expert"
-    assert len(matrix["capabilities"]) == 7
+    assert len(matrix["capabilities"]) == 10
     for cap in matrix["capabilities"]:
+        if cap["id"] in ("moneyflow", "lhb", "margin"):
+            assert cap["candidates"] == []
+            assert cap["usable"] is False
+            continue
         names = [c["name"] for c in cap["candidates"]]
         assert names == ["tickflow"]
         assert cap["candidates"][0]["kind"] == "builtin"
@@ -289,6 +341,9 @@ def test_api_endpoint_injects_all_routing_preferences(monkeypatch):
         "depth5_data_provider": "d5-src",
         "adj_factor_provider": "adj-src",
         "financial_data_provider": "fin-src",
+        "moneyflow_data_provider": "eastmoney",
+        "lhb_data_provider": "eastmoney",
+        "margin_data_provider": "eastmoney",
     }
     getter_names = {
         "realtime_data_provider": "get_realtime_data_provider",
@@ -298,6 +353,9 @@ def test_api_endpoint_injects_all_routing_preferences(monkeypatch):
         "depth5_data_provider": "get_depth5_data_provider",
         "adj_factor_provider": "get_adj_factor_provider",
         "financial_data_provider": "get_financial_provider",
+        "moneyflow_data_provider": "get_moneyflow_data_provider",
+        "lhb_data_provider": "get_lhb_data_provider",
+        "margin_data_provider": "get_margin_data_provider",
     }
     for field, getter in getter_names.items():
         monkeypatch.setattr(preferences, getter, lambda f=field: getter_values[f])

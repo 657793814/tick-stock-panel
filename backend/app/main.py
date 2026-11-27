@@ -35,6 +35,7 @@ from app.api import (
     market_recap,
     mining,
     monitor_rules,
+    news,
     overview,
     pages_admin,
     paper,
@@ -741,6 +742,7 @@ app.include_router(strategy.router)
 app.include_router(strategy_pool.router)
 app.include_router(signals.router)
 app.include_router(monitor_rules.router)
+app.include_router(news.router)
 app.include_router(config_backup.router)
 app.include_router(import_center.router)
 app.include_router(lots.router)

@@ -27,6 +27,8 @@ router = APIRouter(prefix="/api/paper", tags=["paper"])
 # B008: FastAPI 参数默认值需要 Query(...) 调用, 提为模块级单例复用。
 _REPLAY_START = Query(None, description="成交日期起 (含)")
 _REPLAY_END = Query(None, description="成交日期止 (含)")
+_REPLAY_OPEN_DATE = Query(None, description="开仓日 (含)")
+_REPLAY_CLOSE_DATE = Query(None, description="平仓日 (含)")
 
 
 def _data_dir(request: Request) -> Path:
@@ -156,6 +158,29 @@ def delete_account(request: Request, force: bool = False, account: str = Query(p
 
     paper_watch.sync_from_state(request.app.state, _data_dir(request))  # 账户删了, 绑定集变了
     return {"ok": True, "deleted": _acc(request, account), **(result or {})}
+
+
+class AccountBatchDeleteModel(BaseModel):
+    account_ids: list[str]
+    force: bool = False
+
+
+@router.post("/accounts/batch-delete")
+def batch_delete_accounts(request: Request, body: AccountBatchDeleteModel):
+    """批量删除模拟账户 (不可恢复)。按 account_ids 批量传入; 后端 fail-closed:
+    任一账户仍有持仓/待成交且 force=False 时整批不删除 (拒绝明细回传), 全部通过才一次性删除。
+    删除后同步策略绑定集 (paper_watch.sync_from_state)。
+    """
+    try:
+        result = paper.batch_delete_accounts(
+            _data_dir(request), body.account_ids, force=body.force
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    from app.strategy import paper_watch
+
+    paper_watch.sync_from_state(request.app.state, _data_dir(request))  # 账户删了, 绑定集变了
+    return {"ok": True, **result}
 
 
 @router.get("/overview")
@@ -373,6 +398,35 @@ def replay(
     )
     if data is None:
         raise HTTPException(status_code=404, detail=f"该账户无 {sym} 成交")
+    return data
+
+
+@router.get("/replay/round")
+def replay_round(
+    request: Request,
+    symbol: str = Query(..., description="标的代码, 支持 600519 / hk00700 / AAPL 等写法"),
+    open_date: date | None = _REPLAY_OPEN_DATE,
+    close_date: date | None = _REPLAY_CLOSE_DATE,
+    account: str = Query(paper.DEFAULT_ACCOUNT_ID),
+):
+    """单 FIFO 回合的 K 线回放: 开仓日买入标记 + 平仓日卖出标记。"""
+    if open_date and close_date and open_date > close_date:
+        raise HTTPException(status_code=400, detail="开仓日不能晚于平仓日")
+    data_dir = _data_dir(request)
+    acc_id = _acc(request, account)
+    if paper.get_account(data_dir, acc_id) is None:
+        raise HTTPException(status_code=404, detail="账户不存在")
+    sym = normalize_symbol(symbol)
+    data = paper.replay_round(
+        data_dir,
+        sym,
+        open_date.isoformat() if open_date else None,
+        close_date.isoformat() if close_date else None,
+        acc_id,
+        names=_name_map(request, [sym]),
+    )
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"该账户无 {sym} 的该回合")
     return data
 
 

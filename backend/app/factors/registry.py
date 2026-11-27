@@ -91,6 +91,24 @@ def _financial(fid: str, label: str, desc: str) -> FactorSpec:
     )
 
 
+def _holder(fid: str, label: str, desc: str, **overrides) -> FactorSpec:
+    """股东结构因子: 同样走公告日点时门控 (十大股东/股东户数按季或临时公告披露)。"""
+    return FactorSpec(
+        id=fid, label=label, group="股东结构", formula_text=desc,
+        kind="base", pit=True, pit_source="financial_announce",
+        asset_types=_STOCK_ONLY, **overrides,
+    )
+
+
+def _event(fid: str, label: str, desc: str, group: str, **overrides) -> FactorSpec:
+    """日频事件因子 (龙虎榜/两融): 盘后披露, 次交易日生效, 无事件不影响前值。"""
+    return FactorSpec(
+        id=fid, label=label, group=group, formula_text=desc,
+        kind="base", pit=True, pit_source="financial_announce",
+        asset_types=_STOCK_ONLY, stability="experimental", **overrides,
+    )
+
+
 # 顺序即历史 FACTOR_COLUMNS 顺序 (mining_schedule 取前 48 个, 不得重排)。
 _CATALOG: tuple[FactorSpec, ...] = (
     # --- 动量 ---
@@ -234,6 +252,13 @@ _CATALOG: tuple[FactorSpec, ...] = (
     _financial("revenue_yoy_latest", "营收增速(最新公告)", "最新已公告营业收入同比(%)"),
     _financial("net_income_yoy_latest", "净利增速(最新公告)", "最新已公告归母净利润同比(%)"),
     _financial("debt_ratio_latest", "资产负债率(最新公告)", "最新已公告资产负债率(%)"),
+    # --- 股东结构 (点时; 需同步 XTick 股东数据) ---
+    _holder("holder_num", "股东户数(最新公告)", "最新已披露股东户数(户); 户数下降通常代表筹码集中", scale_free=False),
+    _holder("holder_num_chg", "股东户数环比(最新公告)", "相邻已披露报告期股东户数变化率(%)"),
+    _holder("top10_hold_ratio", "前十大股东持股比例", "前十大股东合计持股比例(%)"),
+    _holder("top10_flow_ratio", "前十大流通股东持股比例", "前十大流通股东合计持股比例(%)"),
+    _holder("top10_hhi", "前十大股东集中度", "前十大股东持股比例平方和/10000, 0~1, 越高越集中"),
+    _holder("top10_new_count", "前十大新进家数", "最新报告期前十大股东中新进家数(家)", scale_free=False),
     # --- 扩充批次 (2026-09-05): 规模/收益分解/长窗口/下行风险/量能潮/换手水平 ---
     _virtual(
         "log_float_mv", "流通市值对数", "规模",
@@ -314,6 +339,36 @@ _CATALOG: tuple[FactorSpec, ...] = (
         "kdj_kd_diff", "KDJ K-D差", "趋势",
         "KDJ K值 - D值, 正值代表快线在慢线上方",
         deps=frozenset({"kdj_k", "kdj_d"}),
+    ),
+    # --- 龙虎榜 (日频事件; 需同步东方财富龙虎榜) ---
+    _event(
+        "lhb_net_ratio", "龙虎榜净买占比", "龙虎榜净买入额 / 当日成交额, 未上榜为 0",
+        "龙虎榜",
+    ),
+    _event(
+        "lhb_on_board", "当日是否上榜", "是否登上龙虎榜 (1/0), 事件型哑变量",
+        "龙虎榜", scale_free=False,
+    ),
+    _event(
+        "lhb_reason_count", "上榜原因条数", "当日触发上榜的异动原因条数, 反映异动强度",
+        "龙虎榜", scale_free=False,
+    ),
+    # --- 融资融券 (日频; 比例口径以流通市值归一) ---
+    _event(
+        "margin_balance_ratio", "融资余额占比", "融资余额 / 流通市值(%), 杠杆资金存量强度",
+        "融资融券",
+    ),
+    _event(
+        "margin_buy_ratio", "融资买入占比", "当日融资买入额 / 流通市值(%), 杠杆资金当日强度",
+        "融资融券",
+    ),
+    _event(
+        "margin_net_5d_ratio", "5日融资净买占比", "近5日融资净买入额 / 流通市值(%), 杠杆资金边际方向",
+        "融资融券",
+    ),
+    _event(
+        "margin_short_ratio", "融券余额占比", "融券余额 / 流通市值(%), 做空压力存量",
+        "融资融券",
     ),
 )
 

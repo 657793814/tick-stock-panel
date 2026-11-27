@@ -1093,6 +1093,14 @@ class FuyaoProvider:
         """
         return self._get_client().short_term_benchmark(date)
 
+    def news(self, kind: str, params: dict) -> dict:
+        """新闻资讯原始 data 容器 (资讯详情/事件/快讯/公告/专题/异动/个股分时)。
+
+        非路由数据集 (tickflow 无对应能力), 不进 plugin.yaml datasets;
+        上游字段归一化、Redis 缓存与降级由 services.news 统一负责。
+        """
+        return self._get_client().news(kind, params)
+
     def _derive_bps(self, symbols: list[str]) -> dict[str, float]:
         """估值快照 pb_mrq 与行情快照最新价同源同刻 → bps = price / pb_mrq。
 

@@ -16,9 +16,9 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
-import { Activity, Banknote, ChevronDown, ChevronUp, CircleDollarSign, Cpu, GitCompare, History, ListChecks, PieChart, Plus, RefreshCw, Settings, ShieldAlert, SlidersHorizontal, TrendingUp, Wallet, X, Zap } from 'lucide-react'
+import { Activity, Banknote, ChevronDown, ChevronUp, CircleDollarSign, Cpu, GitCompare, History, ListChecks, PieChart, Trash2, Plus, RefreshCw, Settings, ShieldAlert, SlidersHorizontal, TrendingUp, Wallet, X, Zap } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import { api, type PaperCompareRow, type PaperFill, type PaperHolding, type PaperLiveItem, type PaperLiveTotals, type PaperOrder, type PaperReplayResponse, type PaperRound } from '@/lib/api'
+import { api, type PaperCompareRow, type PaperFill, type PaperHolding, type PaperLiveItem, type PaperLiveTotals, type PaperOrder, type PaperReplayResponse, type PaperReplayRoundResponse, type PaperRound } from '@/lib/api'
 import type { ChartMarker } from '@/lib/chart-types'
 import { StockDailyKChart, getDefaultRange } from '@/components/StockDailyKChart'
 import { QK } from '@/lib/queryKeys'
@@ -535,7 +535,7 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
           disabled={!valid || m.isPending}
           className="flex-1 rounded-btn bg-accent py-2 text-sm font-medium text-white transition-opacity hover:bg-accent/90 disabled:opacity-50"
         >
-          {m.isPending ? '创建中…' : ruleWarn ? '创建账户' : autoId.trim() ? '创建并绑定策略' : '创建账户'}
+          {m.isPending ? '创建中…' : ruleWarn ? '创建账户' : autoId.trim() ? '创建并绑定事件跟单' : '创建账户'}
         </button>
         {onCancel && (
           <button
@@ -550,7 +550,7 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
       </div>
       {ruleWarn && (
         <div className="mt-2 rounded-btn bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
-          账户已创建, 但策略绑定失败: {ruleWarn} — 可在账户面板「自动跟单规则」里手动补建。
+          账户已创建, 但事件跟单规则创建失败: {ruleWarn} — 可在账户面板「旧事件跟单」里手动补建。
           <button onClick={() => onDone(accId)} className="ml-1 underline underline-offset-2">完成</button>
         </div>
       )}
@@ -1503,6 +1503,110 @@ const CMP_SORT_OPTIONS: Array<{ key: CmpSortKey; label: string }> = [
   { key: 'name', label: '账户名' },
 ]
 
+/** 批量删除模拟账户弹窗: 勾选要删除的账户 → 整批删除 (不可恢复)。
+ * 有持仓/待成交的账户会被后端 fail-closed 拒绝整批删除, 需勾「强制」强删 (含持仓台账)。
+ */
+function BatchDeleteModal({ accounts, onClose, onDeleted }: {
+  accounts: PaperCompareRow[]
+  onClose: () => void
+  onDeleted: () => void
+}) {
+  const qc = useQueryClient()
+  const [selected, setSelected] = useState<string[]>([])
+  const [force, setForce] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const toggle = (acc: string) =>
+    setSelected(prev => (prev.includes(acc) ? prev.filter(a => a !== acc) : [...prev, acc]))
+
+  const hasHoldings = accounts.filter(r => r.holdings_count != null && r.holdings_count > 0)
+  const selectedWithHoldings = selected.filter(id => hasHoldings.some(r => r.account === id))
+  const willRefuse = selected.length > 0 && selectedWithHoldings.length > 0 && !force
+  const canDelete = selected.length > 0 && !willRefuse
+
+  const m = useMutation({
+    mutationFn: ({ account_ids, force }: { account_ids: string[]; force: boolean }) =>
+      api.paperBatchDelete({ account_ids, force }),
+    onSuccess: () => {
+      setSelected([])
+      setErr(null)
+      qc.invalidateQueries({ queryKey: QK.paperAll })
+      onDeleted()
+    },
+    onError: e => setErr(String((e as Error).message)),
+  })
+
+  return (
+    <Modal onClose={onClose} labelledBy="batch-del-acc-title">
+      <div className="p-5">
+        <div className="flex items-center gap-2">
+          <ShieldAlert className="h-4 w-4 text-danger" />
+          <h3 id="batch-del-acc-title" className="flex-1 text-sm font-semibold text-foreground">
+            批量删除模拟账户
+            {selected.length > 0 ? <span className="ml-2 font-medium">已选 {selected.length}</span>:null}
+            <span className="ml-1 font-mono text-[10px] text-muted">不可恢复</span></h3>
+        </div>
+        {willRefuse && (
+          <div className="mt-3 rounded-btn border border-warning/30 bg-warning/[0.08] px-2.5 py-2 text-[11px] leading-relaxed text-warning">
+            其中 {selectedWithHoldings.length} 个账户仍有持仓, 会被后端 fail-closed 拒绝整批删除; 请勾选下方「强制」后强删 (含持仓台账, 不可恢复)。
+          </div>
+        )}
+        {accounts.length > 0 && (
+          <div className="mt-3 space-y-1">
+            {accounts.map(r => {
+              const checked = selected.includes(r.account)
+              return (
+                <label key={r.account} className="flex items-center gap-2 rounded-btn border border-border bg-base/40 px-2.5 py-1.5 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggle(r.account)}
+                    className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-accent"
+                  />
+                  <span className="min-w-0 flex-1 truncate">
+                    {r.name}
+                    <span className="font-mono text-[10px] text-muted">{r.account}</span>
+                    {r.holdings_count != null && r.holdings_count > 0 ? <span className="ml-1 text-danger">持仓 {r.holdings_count}</span>:null}
+                  </span>
+                  {force && selectedWithHoldings.includes(r.account) ? <span className="shrink-0 text-danger">强删</span>:null}
+                </label>
+              )
+            })}
+          </div>
+        )}
+        {willRefuse && (
+          <label className="mt-3 flex cursor-pointer items-center gap-2 text-[11px] text-warning">
+            <input
+              type="checkbox"
+              checked={force}
+              onChange={e => setForce(e.target.checked)}
+              className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-warning"
+            />
+            强制删除 (有持仓账户的持仓与台账一并删除, 不可恢复)
+          </label>
+        )}
+        {err && (
+          <div className="mt-3 rounded-btn border border-danger/30 bg-danger/[0.06] px-2.5 py-2 text-[11px] leading-relaxed text-danger">{err}</div>
+        )}
+        <div className="mt-4 flex gap-2">
+          <button
+            onClick={() => m.mutate({ account_ids: selected, force })}
+            disabled={!canDelete || m.isPending}
+            className={cn(
+              'flex-1 rounded-btn py-2 text-sm font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40',
+              'bg-danger/70 hover:bg-danger',
+            )}
+          >
+            {m.isPending ? '删除中…' : '批量删除'}
+          </button>
+          <span className="flex-1 text-xs text-muted">{!canDelete && !willRefuse ? '请先勾选要删除的账户' : ''}</span>
+          <button onClick={onClose} className="rounded-btn border border-border px-4 py-2 text-sm text-secondary transition-colors hover:bg-elevated hover:text-foreground">取消</button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
   const [createOpen, setCreateOpen] = useState(false)
   const [baseOpen, setBaseOpen] = useState(false)
@@ -1510,6 +1614,7 @@ function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
   // 资金全景右侧聚焦账户 (与终端展开解耦: 关掉终端仍保留聚焦)
   const [focusAcc, setFocusAcc] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<PaperCompareRow | null>(null)
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
   const qc = useQueryClient()
   // 卡片排序: 默认累计收益降序; 换列时数值列默认降序、账户名默认升序
   const [sort, setSort] = useState<{ key: CmpSortKey; desc: boolean }>({ key: 'pnl_pct', desc: true })
@@ -1676,6 +1781,14 @@ function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
             >
               <RefreshCw className={cn('h-3 w-3', cmpQ.isFetching && 'animate-spin')} />
               刷新
+            </button>
+            <button
+              onClick={() => setBatchDeleteOpen(true)}
+              className="flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-[11px] text-danger transition-colors hover:border-danger/40 hover:text-danger"
+              title="批量删除模拟账户 (不可恢复): 勾选要删除的账户, 有持仓/待成交时后端需强制确认后才删除"
+            >
+              <Trash2 className="h-3 w-3" />
+              批量删除账户
             </button>
           </div>
         }
@@ -1856,7 +1969,7 @@ function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
                   </button>
                 </div>
                 <div className="p-4">
-                  <AccountPanel acc={selectedRow.account} name={selectedRow.name} onDeleted={() => setExpanded(null)} />
+                  <AccountPanel acc={selectedRow.account} name={selectedRow.name} autoRules={selectedRow.auto_rules} onDeleted={() => setExpanded(null)} />
                 </div>
               </div>
             )}
@@ -1877,6 +1990,9 @@ function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
             qc.invalidateQueries({ queryKey: QK.paperAll })
           }}
         />
+      )}
+      {batchDeleteOpen && (
+        <BatchDeleteModal accounts={rows} onClose={() => setBatchDeleteOpen(false)} onDeleted={() => setBatchDeleteOpen(false)} />
       )}
     </div>
   )
@@ -2347,6 +2463,123 @@ function PaperReplayModal({ acc, symbol, onClose }: { acc: string; symbol: strin
     </Modal>
   )
 }
+type PaperReplayRound = {
+  symbol: string
+  open_date: string
+  close_date: string
+}
+
+/** 按 FIFO 回合回放: 开仓日买入标记 + 平仓日卖出标记, 展示一个完整回合的买卖。 */
+function PaperReplayRoundModal({ acc, round, onClose }: { acc: string; round: PaperReplayRound; onClose: () => void }) {
+  const replayQ = useQuery({
+    queryKey: QK.paperReplayRound(acc, round),
+    queryFn: () => api.paperReplayRound(round, { account: acc }),
+  })
+  const data: PaperReplayRoundResponse | undefined = replayQ.data
+
+  const chartRange = useMemo(() => {
+    const base = getDefaultRange()
+    if (!data) return base
+    const dates = [
+      data?.round?.open_date,
+      data?.round?.close_date,
+      ...(data?.markers ?? []).map((m) => m.date),
+    ].filter((d): d is string => Boolean(d))
+    if (dates.length === 0) return base
+    const first = dates.reduce((a, b) => (a < b ? a : b))
+    const last = dates.reduce((a, b) => (a > b ? a : b))
+    return {
+      start: first < base.start ? shiftIsoDate(first, -20) : base.start,
+      end: last > base.end ? shiftIsoDate(last, 20) : base.end,
+    }
+  }, [data])
+
+  const markers: ChartMarker[] = useMemo(
+    () => (data?.markers ?? []).map((m) => ({
+      date: m.date,
+      kind: m.kind,
+      label: m.label,
+      above: m.above,
+      ...(m.kind === 'neutral' ? { color: '#8B5CF6' } : {}),
+    })),
+    [data],
+  )
+
+  const r = data?.round_summary
+  return (
+    <Modal
+      onClose={onClose}
+      labelledBy="paper-replay-round-title"
+      panelClassName="w-[96vw] max-w-6xl max-h-[92vh] overflow-y-auto bg-surface border border-border rounded-card shadow-xl"
+    >
+      <div className="p-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <TrendingUp className="h-4 w-4 text-accent" />
+          <h3 id="paper-replay-round-title" className="font-semibold text-sm text-foreground">
+            回合回放
+            <span className="ml-2 font-mono text-[11px] text-muted">
+              {round.symbol} · {round.open_date} → {round.close_date}
+            </span>{r && r.open_price != null && r.close_price != null ? (
+              <span className="ml-1.5 text-[11px] font-normal text-secondary">
+                开仓 {fmtMoney(r.open_price, 3)} / 平仓 {fmtMoney(r.close_price, 3)}
+              </span>) : null}
+          </h3>{data && (
+            <span className="rounded-full bg-elevated px-2 py-0.5 text-[10px] text-muted">
+              {data.market.toUpperCase()}
+            </span>)}
+          <button
+            onClick={onClose}
+            className="ml-auto rounded-btn border border-border px-2.5 py-1 text-xs text-muted transition-colors hover:border-accent/40 hover:text-accent"
+          >
+            关闭
+          </button>
+        </div>
+
+        {data && r && (
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            <StatCard label="数量" value={`${r.qty}`} />
+            <StatCard label="开仓均价" value={r.open_price != null ? fmtMoney(r.open_price, 3) : '--'} sub={r.open_date} />
+            <StatCard label="平仓均价" value={r.close_price != null ? fmtMoney(r.close_price, 3) : '--'} sub={r.close_date} />
+            <StatCard
+              label="回合盈亏"
+              value={`${r.pnl >= 0 ? '+' : ''}${fmtMoney(r.pnl, 0)}`}
+              valueClass={priceColorClass(r.pnl)}
+            />
+            <StatCard label="收益率" value={r.pnl_pct == null ? '--' : fmtPct(r.pnl_pct / 100)} sub={`${r.holding_days} 天`} />
+            <StatCard label="平仓日" value={r.close_date} sub={r.open_price != null ? fmtMoney(r.open_price, 3) : undefined} />
+          </div>
+        )}
+
+        {data && (
+        <div className="mt-4 rounded-card border border-border bg-base/30 p-2">
+          <StockDailyKChart
+            symbol={data.symbol}
+            dateRange={chartRange}
+            markers={markers}
+            height={360}
+            visibleBars={120}
+            showLimitMarkers={false}
+            showIndicatorControls={false}
+            showMarkerToggle={false}
+            showMA
+          />
+        </div>
+        )}
+
+        {data && (
+          <div className="mt-3 flex items-center gap-2 text-[11px] text-muted">
+            <span className="rounded-full bg-elevated px-2 py-0.5">回合标记</span>
+            {data.markers.map((m, i) => (
+              <span key={i} className="rounded-full bg-base/50 px-2 py-0.5">
+                {m.date} · {m.kind === 'buy' ? '回合买入 (蜡烛下方)' : '回合卖出 (蜡烛上方)'}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </Modal>
+  )
+}
 
 export function Paper() {
   const qc = useQueryClient()
@@ -2387,6 +2620,7 @@ const ENGINE_STATE_LABEL: Record<string, string> = {
   waiting: '等待信号',
   paused: '已暂停',
   blocked: '已阻断',
+  legacy: '旧事件跟单',
   idle: '待接入',
 }
 
@@ -2856,7 +3090,7 @@ function CapitalFlowStage({ symbols, strategies, accounts, focusAccount, orders,
 
 /** 策略引擎控制台: 引擎状态 + 管道阶段 + 实时订单流。
  *  全部数据来自真实跟单状态/订单/成交, 无数据时退化为雷达待机态。 */
-function PaperLiveConsole({ account, ov, orders, fills, symbolNames }: {
+function PaperLiveConsole({ account, ov, orders, fills, symbolNames, legacyRules }: {
   account: string
   ov: {
     total?: number
@@ -2868,6 +3102,7 @@ function PaperLiveConsole({ account, ov, orders, fills, symbolNames }: {
   orders: PaperOrder[]
   fills: PaperFill[]
   symbolNames: Record<string, string>
+  legacyRules: NonNullable<PaperCompareRow['auto_rules']>
 }) {
   const bindingQ = useQuery({
     queryKey: executionKey(account),
@@ -2887,10 +3122,11 @@ function PaperLiveConsole({ account, ov, orders, fills, symbolNames }: {
   const recent = orders.slice(0, 6)
   const lastFill = todayFills[todayFills.length - 1]
 
+  const legacyEnabled = legacyRules.filter(r => r.enabled)
   const state = !binding
-    ? 'idle'
+    ? legacyEnabled.length > 0 ? 'legacy' : 'idle'
     : binding.enabled
-      ? binding.status === 'blocked' ? 'blocked' : 'running'
+      ? binding.status === 'blocked' ? 'blocked' : binding.status === 'waiting' ? 'waiting' : 'running'
       : 'paused'
   const live = state === 'running'
   const stages = [
@@ -2915,8 +3151,15 @@ function PaperLiveConsole({ account, ov, orders, fills, symbolNames }: {
             </span>
           </div>
           <div className="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="truncate text-sm font-medium">
-              {binding ? binding.snapshot.name : '未接入策略快照'}
+            <span
+              className="truncate text-sm font-medium"
+              title={!binding && legacyEnabled.length > 0 ? legacyEnabled.map(r => r.name).filter(Boolean).join('、') : undefined}
+            >
+              {binding
+                ? binding.snapshot.name
+                : legacyEnabled.length > 0
+                  ? `已绑定旧事件跟单（${legacyEnabled.length} 条）`
+                  : '未接入策略快照'}
             </span>
             {binding?.last_bar && (
               <span className="font-mono text-[10px] text-muted">最近信号日 {binding.last_bar}</span>
@@ -3056,12 +3299,13 @@ function PaperLiveConsole({ account, ov, orders, fills, symbolNames }: {
 
 /** 账户操作面板 (原单账户视图主体): 在对比榜单行展开内渲染, 免跳转。
  *  含总览卡/净值曲线/持仓/订单与成交/回合明细/下单/跟单规则/费用设置/冻结/删除。 */
-function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; onDeleted?: () => void }) {
+function AccountPanel({ acc, name, autoRules, onDeleted }: { acc: string; name?: string; autoRules?: PaperCompareRow['auto_rules']; onDeleted?: () => void }) {
   const qc = useQueryClient()
   const [tab, setTab] = useState<'orders' | 'trades' | 'rounds'>('orders')
   const [feeOpen, setFeeOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [replaySymbol, setReplaySymbol] = useState<string | null>(null)
+  const [replayRound, setReplayRound] = useState<PaperReplayRound | null>(null)
   const [showAllOrders, setShowAllOrders] = useState(false)
   const [showAllTrades, setShowAllTrades] = useState(false)
 
@@ -3216,6 +3460,7 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
             orders={allOrders}
             fills={allFills}
             symbolNames={symbolNames}
+            legacyRules={autoRules ?? []}
           />
         </div>
 
@@ -3433,6 +3678,13 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
                             <td className={cn('py-1.5 text-right', priceColorClass(rt.pnl_pct))}>
                               {fmtPct(rt.pnl_pct / 100)}
                             </td>
+                            <button
+                              onClick={() => setReplayRound({ symbol: rt.symbol, open_date: rt.open_date, close_date: rt.close_date })}
+                              className="shrink-0 rounded-btn border border-border px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-accent/40 hover:text-accent"
+                              title="在日K上回放该回合的买卖 (开仓日买入 + 平仓日卖出)"
+                            >
+                              回合回放
+                            </button>
                           </tr>
                         ))}
                       </tbody>
@@ -3515,6 +3767,9 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
       )}
       {replaySymbol && (
         <PaperReplayModal acc={acc} symbol={replaySymbol} onClose={() => setReplaySymbol(null)} />
+      )}
+      {replayRound && (
+        <PaperReplayRoundModal acc={acc} round={replayRound} onClose={() => setReplayRound(null)} />
       )}
     </div>
   )

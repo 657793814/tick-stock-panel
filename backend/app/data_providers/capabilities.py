@@ -3,6 +3,10 @@
 能力 (capability) = 一个标准化数据集 (CONTRIBUTING「数据源插件化要求」):
 daily / adj_factor / realtime / minute / depth5 / financial (注册表顺序即设置页卡片顺序)。注册表集中声明每个
 能力的展示元数据、路由偏好字段与 TickFlow 档位要求, 前端设置页不再各自硬编码。
+
+事件类能力 (moneyflow / lhb / margin) 声明 ``tf_provides: False``: TickFlow 不提供
+这些数据集, 永不进候选、tf_available 恒 False, 偏好默认指向 eastmoney (非法值由
+preferences getter 回退该默认而非 tickflow)。
 depth5 与其他数据集一样可由插件声明并独立路由; 五档不可用时连板梯队封单/
 看板封单通过 usable 给出缺数据提示。
 
@@ -86,6 +90,37 @@ CAPABILITY_REGISTRY: list[dict] = [
         # TickFlow 侧需 Expert 档; 插件/自定义源声明 full_minute 数据集即可提供
         # (插件实现 get_intraday_batch / 可选 get_intraday_latest, YAML 仅修复轮)
     },
+    {
+        # 以下三项为事件类能力 (tf_provides=False): TickFlow 不提供, 偏好默认
+        # 指向 eastmoney。lhb/margin 是「按日全市场」维度 (services/eastmoney_sync
+        # 直接调 client 落 data/financials), moneyflow 是「逐标的」维度 (provider
+        # 方法 get_moneyflow, 经 scripts/ingest_moneyflow_factors 落 ext 因子)。
+        "id": "moneyflow",
+        "label": "资金流",
+        "desc": "主力/超大单/大单/小单净额与占比 (日线, T-1 因子)",
+        "field": "moneyflow_data_provider",
+        "default": "eastmoney",
+        "tf_tier": "none",
+        "tf_provides": False,
+    },
+    {
+        "id": "lhb",
+        "label": "龙虎榜",
+        "desc": "按日全市场上榜明细与净额 (T+1 生效)",
+        "field": "lhb_data_provider",
+        "default": "eastmoney",
+        "tf_tier": "none",
+        "tf_provides": False,
+    },
+    {
+        "id": "margin",
+        "label": "两融",
+        "desc": "按日全市场两融余额与占比 (T+1 生效)",
+        "field": "margin_data_provider",
+        "default": "eastmoney",
+        "tf_tier": "none",
+        "tf_provides": False,
+    },
 ]
 
 _TICKFLOW_CANDIDATE = {
@@ -163,7 +198,8 @@ def build_capability_matrix(current: dict[str, str], tickflow_tier: str = "none"
     for cap in CAPABILITY_REGISTRY:
         # field=None → 不可路由能力 (仅 TickFlow 提供, 无路由偏好), 生效源恒为默认
         effective = current.get(cap["field"], cap["default"]) if cap["field"] else cap["default"]
-        tf_available = tier_rank >= _TIER_RANK[cap["tf_tier"]]
+        # tf_provides=False → TickFlow 不提供该数据集, 档位再高也不进候选
+        tf_available = cap.get("tf_provides", True) and tier_rank >= _TIER_RANK[cap["tf_tier"]]
         candidates: list[dict] = []
         pending: list[dict] = []
         if tf_available:
@@ -224,6 +260,9 @@ def _current_routing() -> dict[str, str]:
         "depth5_data_provider": preferences.get_depth5_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
+        "moneyflow_data_provider": preferences.get_moneyflow_data_provider(),
+        "lhb_data_provider": preferences.get_lhb_data_provider(),
+        "margin_data_provider": preferences.get_margin_data_provider(),
     }
 
 
@@ -247,7 +286,7 @@ def resolve_capability_sources(tickflow_tier: str = "none") -> list[dict]:
         if not field:
             continue
         effective = current.get(field, cap["default"])
-        tf_available = tier_rank >= _TIER_RANK[cap["tf_tier"]]
+        tf_available = cap.get("tf_provides", True) and tier_rank >= _TIER_RANK[cap["tf_tier"]]
         provider_names = {"tickflow"} if tf_available else set()
         provider_names |= {
             s["name"] for s in sources

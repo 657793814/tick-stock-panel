@@ -1,20 +1,28 @@
-# 东方财富 — 公开行情接口插件 (push2his.eastmoney.com, 免 token)
+# 东方财富 — 公开数据接口插件 (push2his / datacenter-web, 免 token)
 # 纯 HTTP REST 源, 无额外依赖 (runtime: none), 启动自检不做网络请求。
 #
-# 数据集声明约定(对齐 fuyao.dragon_tiger 的项目惯例): moneyflow 属非路由数据集
-# (能力路由 CAPABILITY_REGISTRY 无对应槽位), 不写入本清单 datasets —— 清单只列
-# 可路由的标准能力数据集。消费方经 custom.loader.get_provider("eastmoney")
-# 直取 provider.get_moneyflow(); 落因子由 scripts/ingest_moneyflow_factors.py 负责。
+# 数据集声明: moneyflow / lhb / margin 三类事件数据集已注册为能力路由槽位
+# (CAPABILITY_REGISTRY, tf_provides=False —— TickFlow 不提供, 默认路由 eastmoney)。
+# 取数形态差异:
+#   - moneyflow 是「逐标的」维度, provider 方法 get_moneyflow() 可被任意消费方
+#     经 custom.loader.get_provider("eastmoney") 直取;
+#   - lhb / margin 是「按日全市场」维度, 与 provider 按 symbols 批量的契约不匹配,
+#     不设 provider 方法, 由 services/eastmoney_sync.py 直接调 client.fetch_lhb_day/
+#     fetch_margin_day 落 data/financials/{lhb_metrics,margin_metrics}。
+# 声明 datasets 仅接入能力路由矩阵 (设置页展示与门控); 未来若有其他源声明
+# 同名数据集, 消费方应按 lhb_data_provider/margin_data_provider/moneyflow_data_provider
+# 偏好分流, 不再写死 eastmoney。
 
 name: eastmoney
-display_name: "eastmoney"
+display_name: "东方财富"
 runtime: none
 entry: app.plugins.eastmoney.provider:EastmoneyProvider
 check: app.plugins.eastmoney.provider:availability
-datasets: []
-description: "东方财富公开接口(免token)。非路由数据集 moneyflow: 个股资金流日线(主力/超大单/大单/小单净额与占比, 约120个交易日历史), 经 provider.get_moneyflow 由 ext_data 因子通道消费, 不参与能力路由。高频请求会触发东财 IP 风控, provider 已内置逐股节流。"
+datasets: [moneyflow, lhb, margin]
+description: "东方财富公开接口(免 token)。事件类能力(路由默认源): moneyflow 个股资金流日线(主力/超大单/大单/小单净额与占比, 约120个交易日); lhb 龙虎榜明细与 margin 融资融券明细(按日全市场, 可回溯历史)。后两者落 data/financials/{lhb_metrics,margin_metrics}, 注册为「龙虎榜」「融资融券」因子组(T日数据T+1生效)。高频请求会触发东财 IP 风控, provider 已内置逐股/逐日节流。"
 usage_notes:
-  - "moneyflow 非标准行情数据集: 不出现在能力路由, 由 scripts/ingest_moneyflow_factors.py 消费落 ext_data 因子列(与 fuyao.dragon_tiger 同一约定)。"
-  - "历史深度约 120 个交易日; 净额单位元(正=净流入), 占比为百分数数值。"
-  - "落因子前由脚本统一做 T-1 滞后(当日盘后资金流 → 次交易日生效), 防前视。"
+  - "moneyflow: 逐股, 约 120 交易日历史; 净额单位元(正=净流入), 占比为百分数数值。"
+  - "龙虎榜: 单日 1 次请求(全市场), 同一标的多条上榜原因取净额绝对值最大的一条。"
+  - "融资融券: 单日约 9 页(4500 行), 只保留 A 股, 比例以流通市值归一。"
+  - "龙虎榜/两融需在 /eastmoney 页或 POST /api/eastmoney/sync/{table} 手动同步, 逐日节流 1.2s。"
 homepage: "https://quote.eastmoney.com/"

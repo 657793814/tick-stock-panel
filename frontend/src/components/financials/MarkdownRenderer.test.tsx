@@ -93,3 +93,64 @@ it('narrow tables (<=4 cols) keep fixed layout with breakable cells', async () =
   expect(html).toContain('break-words')
   expect(html).not.toContain('overflow-x-auto')
 })
+
+it('joins consecutive plain lines into one paragraph (markdown soft wrap)', async () => {
+  // YAML | 块按源码宽度折行的长文本: 连续普通行应合为一段, 而不是每行一个 <p>
+  const html = await renderToHtml('路由数据集: 实时快照、五档盘口、\n日K 与全量分钟均为单标的或批量端点。\n\n第二段独立成段。')
+  const host = document.createElement('div')
+  host.innerHTML = html
+  const ps = host.querySelectorAll('p')
+  expect(ps.length).toBe(2)
+  // 中文边界直接相连, 不插入空格
+  expect(ps[0]!.textContent).toBe('路由数据集: 实时快照、五档盘口、日K 与全量分钟均为单标的或批量端点。')
+  expect(ps[1]!.textContent).toBe('第二段独立成段。')
+})
+
+it('joins english lines with a space, CJK boundary without', async () => {
+  const html = await renderToHtml('Visit the docs page\nfor more details。')
+  const host = document.createElement('div')
+  host.innerHTML = html
+  expect(host.querySelector('p')!.textContent).toBe('Visit the docs page for more details。')
+})
+
+it('soft-wrap merge stops at block starts (heading/list/quote/table)', async () => {
+  const html = await renderToHtml('第一段第一行\n第一段第二行\n## 标题\n- 列表项\n> 引用\n| 表 |\n|---|\n| a |')
+  const host = document.createElement('div')
+  host.innerHTML = html
+  const ps = host.querySelectorAll('p')
+  expect(ps.length).toBe(1)
+  expect(ps[0]!.textContent).toBe('第一段第一行第一段第二行')
+  expect(host.textContent).toContain('标题')
+  expect(host.querySelector('li')).not.toBeNull()
+  expect(host.querySelector('blockquote')).not.toBeNull()
+  expect(host.querySelector('table')).not.toBeNull()
+})
+
+it('absorbs indented continuation lines into list items (yaml | block style)', async () => {
+  // 腾讯行情描述的真实形态: 列表项后跟缩进续行, 续行应并入条目而非掉出成独立短段
+  const html = await renderToHtml(
+    '腾讯免费公开行情接口, 无需注册和 token。路由能力:\n' +
+    '- 分钟 K (m1, 单标的拉取): 实测每次约 482 根 (≈2 交易日), 上游不接受日期范围参数,\n' +
+    '  逐日增量落盘可累积历史;\n' +
+    '- 实时快照 / 五档盘口 (批量 ≤50 只/请求): 按标的列表拉取,\n' +
+    '  上游无法枚举全市场标的。\n' +
+    '  自选补拉与指数快照正常可用;',
+  )
+  const host = document.createElement('div')
+  host.innerHTML = html
+  // 只有 1 个 <p> (引言行), 两条列表项各自吸收续行
+  expect(host.querySelectorAll('p').length).toBe(1)
+  const items = [...host.querySelectorAll('li')].map(li => li.textContent)
+  expect(items.length).toBe(2)
+  expect(items[0]).toBe('分钟 K (m1, 单标的拉取): 实测每次约 482 根 (≈2 交易日), 上游不接受日期范围参数,逐日增量落盘可累积历史;')
+  expect(items[1]).toBe('实时快照 / 五档盘口 (批量 ≤50 只/请求): 按标的列表拉取,上游无法枚举全市场标的。自选补拉与指数快照正常可用;')
+})
+
+it('ordered list items also absorb indented continuations', async () => {
+  const html = await renderToHtml('1. 第一条较长说明需要折行,\n   续行并入同一条目\n2. 第二条')
+  const host = document.createElement('div')
+  host.innerHTML = html
+  const items = [...host.querySelectorAll('li')].map(li => li.textContent)
+  // ol 的 li 内含序号徽章 (如 "1"), 文本断言需带上
+  expect(items).toEqual(['1第一条较长说明需要折行,续行并入同一条目', '2第二条'])
+})

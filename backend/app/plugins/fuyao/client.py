@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from typing import ClassVar
 
 import httpx
 
@@ -325,6 +326,26 @@ class FuyaoClient:
         if date:
             params["date"] = date
         return self._get("/api/a-share/auction/short-term-benchmark", params)
+
+    # ---- 新闻资讯 (fuyao 专有, 非路由数据集) ----
+    # 路径白名单: 业务层只传 kind, 不允许把外部字符串拼进请求路径。
+    _NEWS_PATHS: ClassVar[dict[str, str]] = {
+        "article_detail": "/api/news/article/detail",
+        "events_search": "/api/news/events/search",
+        "flash_list": "/api/news/flash/list",
+        "flash_refresh": "/api/news/flash/refresh",
+        "notice_detail": "/api/news/notice/detail",
+        "topic_hot_list": "/api/news/topic/hot-list",
+        "anomaly_analysis": "/api/news/anomaly/analysis",
+        "stock_timeline": "/api/news/stock/timeline-list",
+    }
+
+    def news(self, kind: str, params: dict) -> dict:
+        """新闻类接口原始 data 容器; kind 必须在白名单内, 错误由 _get 抛 FuyaoError。"""
+        path = self._NEWS_PATHS.get(kind)
+        if path is None:
+            raise FuyaoError(f"未知新闻接口类型: {kind}")
+        return self._get(path, params)
 
     # ---- 市场 dump ----
     def dump_download_url(self, dump_kind: str) -> dict:

@@ -108,6 +108,11 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   return (responseType === 'blob' ? res.blob() : res.json()) as Promise<T>
 }
 
+/** 批量删除单个账户的删除结果 */
+export interface PaperAccountDeleteItem { id: string; holdings: number; pending_orders: number }
+/** 批量删除中被拒绝的账户 (有持仓/待成交, 未删除) */
+export interface PaperAccountRefused { id: string; reason: string }
+
 // ===== Capabilities =====
 export interface CapabilityLimits {
   rpm: number | null
@@ -864,6 +869,174 @@ export interface AuctionBenchmarkPayload {
   items?: AuctionBenchmarkItem[]
 }
 
+// ===== 新闻资讯 (fuyao 专有, Redis 缓存 7 天) =====
+export type NewsState =
+  | 'ok' | 'no_data' | 'source_unavailable' | 'upstream_error' | 'rate_limited' | 'invalid_request'
+
+export interface NewsPayload<T> {
+  state: NewsState
+  kind: string
+  message: string | null
+  data: T | null
+  cached: boolean
+  cache_ttl_seconds: number
+}
+
+export interface NewsStatus {
+  source: string
+  available: boolean
+  cache_ttl_days: number
+  message: string
+}
+
+// ===== XTick 专用能力 (非路由数据集) =====
+export type XTickState =
+  | 'ok' | 'no_data' | 'source_unavailable' | 'upstream_error' | 'invalid_request'
+
+export interface XTickPayload<T> {
+  state: XTickState
+  kind: string
+  message: string | null
+  data: T | null
+  cached: boolean
+  cache_ttl_seconds: number
+}
+
+export interface XTickStatus {
+  source: string
+  /** 页面展示名 (与 plugin.yaml display_name 一致) */
+  display_name?: string
+  available: boolean
+  cache_ttl_days: number
+  message: string
+}
+
+export type XTickRow = Record<string, unknown>
+export type XTickData = { items: XTickRow[] } | XTickRow
+
+// ===== 东方财富日频事件 (龙虎榜 / 融资融券) =====
+export interface EastmoneyTableStatus {
+  label: string
+  rows: number
+  symbols: number
+  start: string | null
+  end: string | null
+}
+
+export interface EastmoneyStatus {
+  source: string
+  /** 页面展示名 (与 plugin.yaml display_name 一致) */
+  display_name?: string
+  available: boolean
+  tables: Record<string, EastmoneyTableStatus>
+  syncing: boolean
+  sync: { running: boolean; table: string | null; rows: number; error: string | null }
+}
+
+export interface EastmoneyData {
+  table: string
+  columns: string[]
+  rows: Record<string, unknown>[]
+}
+
+export interface NewsArticle {
+  encoded_seq: string
+  title: string
+  author: string | null
+  summary: string | null
+  content: string
+  source: string | null
+  publish_time_ms: number | null
+  is_kuaixun: boolean | null
+}
+
+export interface NewsFlashItem {
+  id: string | null
+  seq: string | null
+  title: string
+  encoded_url: string
+  summary: string | null
+  tags: { id: number | null; name: string | null }[]
+  type: number | null
+  create_time_ms: number | null
+  update_time_ms: number | null
+  pic_url: string | null
+}
+
+export interface NewsTopicItem {
+  id: string | null
+  title: string
+  cover: string | null
+  url: string
+  type: string | null
+  seo_key: string | null
+  propagation_chain: string | null
+  important_flag: number | null
+  pinned_flag: number | null
+  pin_label: string | null
+  source_created_at: string | null
+  source_updated_at: string | null
+}
+
+export interface NewsAnomalyItem {
+  analysis_id: string | null
+  domain: string | null
+  analysis_content: string | null
+  key_word_list: string[] | null
+  anomaly_type: string | null
+  tag_code: string | null
+  tag_name: string | null
+  link_url: string
+  /** 上游单位待核实, 前端只做原值展示, 不换算 */
+  create_time: number | null
+  last_anomaly_time: number | null
+  first_publish_time: number | null
+  tag_code_update_time: number | null
+}
+
+export interface NewsAnomalyPayload {
+  items: NewsAnomalyItem[]
+  was_truncated: boolean
+  /** 多日聚合时部分日期上游不可用 */
+  partial?: boolean
+  skipped_days?: number
+}
+
+export interface NewsTimelineItem {
+  id: string | null
+  type: number | null
+  title: string
+  author: string | null
+  source: string | null
+  summary: string | null
+  publish_time_ms: number | null
+  jump_url: string
+  pic_url: string | null
+}
+
+export interface NewsNotice {
+  seq: string
+  guid: string | null
+  title: string
+  report_period: string | null
+  summary: { notice_type: string | null; items: { title: string | null; content: string | null }[] } | null
+  monthly_report_interpretation: {
+    notice_type: string | null
+    has_findings: boolean
+    findings: { title: string | null; blocks: { sub_title: string | null; content_html: string | null }[] }[]
+    summary_html: string | null
+  } | null
+}
+
+function newsQuery(params: Record<string, string | number | boolean | null | undefined>): string {
+  const q = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') q.set(key, String(value))
+  }
+  const qs = q.toString()
+  return qs ? `?${qs}` : ''
+}
+
 // ===== Strategy Engine =====
 /** 参数级联显隐条件 (UI 元数据, 后端原样透传)。三种形态可递归组合:
  *  { param, in } — values[param] ∈ in;  { all: [...] } — 全部成立;  { any: [...] } — 任一成立 */
@@ -1527,6 +1700,37 @@ export interface PaperReplayResponse {
   summary: PaperReplaySummary
   total_fills: number
   truncated: boolean
+}
+
+export interface PaperReplayRoundResponse {
+  account: string
+  account_name: string
+  symbol: string
+  name: string
+  asset_type: string
+  market: 'cn' | 'hk' | 'us'
+  start: string | null
+  close_date: string | null
+  round: {
+    symbol: string
+    open_date: string
+    close_date: string
+    qty: number
+    pnl: number
+    pnl_pct: number | null
+    holding_days: number | null
+  }
+  round_summary: {
+    open_date: string
+    close_date: string
+    qty: number
+    pnl: number
+    pnl_pct: number | null
+    holding_days: number
+    open_price: number | null
+    close_price: number | null
+  }
+  markers: PaperReplayMarker[]
 }
 
 export interface VDBasicFilter {
@@ -2403,6 +2607,9 @@ export type ProviderField =
   | 'depth5_data_provider'
   | 'realtime_data_provider'
   | 'financial_data_provider'
+  | 'moneyflow_data_provider'
+  | 'lhb_data_provider'
+  | 'margin_data_provider'
 
 /** 能力路由矩阵中的一个候选源 (candidates 只含当前确实可提供该能力的源) */
 export interface CapabilityCandidate {
@@ -2639,6 +2846,10 @@ export interface Preferences {
   depth5_data_provider?: string
   realtime_data_provider?: string
   financial_data_provider?: string
+  /** 事件类能力 (tf_provides=False): TickFlow 不提供, 默认 eastmoney */
+  moneyflow_data_provider?: string
+  lhb_data_provider?: string
+  margin_data_provider?: string
   data_source_job_timeout_s: number
   data_source_long_job_timeout_s: number
   minute_batch_compress: boolean
@@ -2798,6 +3009,8 @@ export interface SectorRotation {
   default_exclude_sectors?: string[]
   /** 自动活跃榜成员数上限 */
   max_auto_members?: number
+  /** 板块成分实际使用的扩展表与上游 (页面标注"成分来源", 不写死同花顺) */
+  sources?: { id: string; label: string; upstream: string | null }[]
   as_of?: string
   timeline: SectorRotationPoint[]
   /** 0 轴穿越事件 (全市场板块, 最新在前, 封顶 120 条) */
@@ -4753,6 +4966,12 @@ export const api = {
       `/api/financials/sync/${table}`, { method: 'POST' },
     ),
 
+  /** 股东结构同步 (XTick): 逐股拉取十大股东/流通股东/股东户数, 后台执行。 */
+  holderMetricsSync: () =>
+    request<{ status: string; message?: string }>(
+      '/api/financials/sync/holder-metrics', { method: 'POST' },
+    ),
+
   /** AI 分析报告 CRUD */
   financialReportsList: () =>
     request<{ reports: AiFinancialReport[] }>('/api/financials/reports'),
@@ -4892,6 +5111,64 @@ export const api = {
       try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
     }
   },
+
+  // ===== 新闻资讯 (fuyao 专有) =====
+  newsStatus: () => request<NewsStatus>('/api/news/status'),
+  newsArticleDetail: (clientType: string, encodedSeq: string) =>
+    request<NewsPayload<NewsArticle>>(
+      `/api/news/articles/detail${newsQuery({ client_type: clientType, encoded_seq: encodedSeq })}`,
+    ),
+  newsEvents: (params: {
+    query?: string; search_param?: string; standard_start_time?: string; standard_end_time?: string
+    event_grading_score?: string; related_industry_code?: string; related_concept_code?: string; size?: number
+  }) => request<NewsPayload<{ total: number; items: Record<string, unknown>[] }>>(
+    `/api/news/events${newsQuery(params)}`,
+  ),
+  newsFlashList: (tagId: number, seq = '0') =>
+    request<NewsPayload<{ items: NewsFlashItem[] }>>(
+      `/api/news/flash/list${newsQuery({ tag_id: tagId, seq })}`,
+    ),
+  newsFlashRefresh: (tagId: number, seq: string, createTimeMs: number) =>
+    request<NewsPayload<{ items: NewsFlashItem[] }>>(
+      `/api/news/flash/refresh${newsQuery({ tag_id: tagId, seq, create_time_ms: createTimeMs })}`,
+    ),
+  newsNoticeDetail: (seq: string) =>
+    request<NewsPayload<NewsNotice>>(
+      `/api/news/notices/detail${newsQuery({ seq })}`,
+    ),
+  newsTopicHot: (params: { tab_id: number; cursor?: string; limit?: number; important_only?: boolean }) =>
+    request<NewsPayload<{ items: NewsTopicItem[]; next_cursor: string | null; has_more: boolean }>>(
+      `/api/news/topics/hot${newsQuery(params)}`,
+    ),
+  newsAnomalyAnalysis: (params: { begin_date: string; end_date: string; thscode?: string }) =>
+    request<NewsPayload<NewsAnomalyPayload>>(
+      `/api/news/anomaly/analysis${newsQuery(params)}`,
+    ),
+  newsStockTimeline: (params: { thscode: string; offset?: string; size?: number }) =>
+    request<NewsPayload<{ items: NewsTimelineItem[]; has_more: boolean; offset: string | null }>>(
+      `/api/news/stock/timeline${newsQuery(params)}`,
+    ),
+
+  // ===== XTick 专用能力 (XTick 插件, 非路由数据集) =====
+  xtickStatus: () => request<XTickStatus>('/api/xtick/status'),
+  xtickData: (
+    kind: string,
+    params: Record<string, string | number | boolean | null | undefined> = {},
+  ) => request<XTickPayload<XTickData>>(
+    `/api/xtick/data/${encodeURIComponent(kind)}${newsQuery(params)}`,
+  ),
+
+  // ===== 东方财富日频事件 (龙虎榜 / 融资融券) =====
+  eastmoneyStatus: () => request<EastmoneyStatus>('/api/eastmoney/status'),
+  eastmoneyData: (table: string, params: { symbol?: string; limit?: number } = {}) =>
+    request<EastmoneyData>(
+      `/api/eastmoney/data/${encodeURIComponent(table)}${newsQuery(params)}`,
+    ),
+  eastmoneySync: (table: string, days?: number) =>
+    request<{ status: string; table?: string; days?: number; message?: string }>(
+      `/api/eastmoney/sync/${encodeURIComponent(table)}${newsQuery({ days })}`,
+      { method: 'POST' },
+    ),
 
   // ===== 大盘复盘 =====
   reviewReportsList: () =>
@@ -5317,6 +5594,19 @@ export const api = {
     return request<PaperReplayResponse>(`/api/paper/replay?${q.toString()}`)
   },
 
+  paperReplayRound: (
+    round: { symbol: string; open_date: string; close_date: string },
+    opts: { account?: string } = {},
+  ) => {
+    const q = new URLSearchParams({
+      symbol: round.symbol,
+      open_date: round.open_date,
+      close_date: round.close_date,
+    })
+    if (opts.account) q.set('account', opts.account)
+    return request<PaperReplayRoundResponse>(`/api/paper/replay/round?${q.toString()}`)
+  },
+
   paperNav: (account?: string) =>
     request<{ nav: Array<{ date: string; cash: number; mv: number; nav: number }> }>(accUrl('/api/paper/nav', account)),
 
@@ -5339,6 +5629,20 @@ export const api = {
   /** 删除账户及其全部数据 (不可恢复); 有持仓/待成交订单时后端拒绝, force=true 强删 */
   paperDeleteAccount: (force: boolean, account?: string) =>
     request<{ ok: boolean; deleted: string; holdings?: number; pending_orders?: number }>(accUrl(`/api/paper/account?force=${force}`, account), { method: 'DELETE' }),
+
+  /** 批量删除模拟账户 (不可恢复); 有持仓/待成交订单时后端拒绝整批删除 (fail-closed) */
+  paperBatchDelete: (body: { account_ids: string[]; force: boolean }) =>
+    request<{
+      ok: boolean
+      deleted: PaperAccountDeleteItem[]
+      refused: PaperAccountRefused[]
+      total: number
+      total_deleted: number
+      total_refused: number
+    }>('/api/paper/accounts/batch-delete', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   paperAutoRules: (account?: string) =>
     request<{ rules: PaperAutoRule[] }>(accUrl('/api/paper/auto_rules', account)),
@@ -5837,6 +6141,8 @@ export interface ExtDataConfig {
   plate?: { date: string; plates: number; from: string; to: string; granularity: 'intraday' | 'daily' } | null
   /** 生效序列粒度 (显式声明 > 数据形态判断): intraday | daily; snapshot 表为 null */
   granularity_effective?: 'intraday' | 'daily' | null
+  /** 上游展示名 (由 pull.url 反查: 同花顺 / 东方财富 / ...); 无法识别为 null */
+  source_label?: string | null
   pull?: PullConfig | null
 }
 

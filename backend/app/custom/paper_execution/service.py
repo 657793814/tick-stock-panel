@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 PREFIX = "strategy-exec:"
 
 
+class DataNotReady(ValueError):
+    """输入数据尚未就绪；保持绑定启用，下个 tick 重试。"""
+
+
 class ExecutionService:
     def __init__(self, data_dir: Path, engine, screener, quotes=None):
         self.data_dir = Path(data_dir)
@@ -132,16 +136,24 @@ class ExecutionService:
                     raise ValueError("请先创建或解冻模拟账户")
                 positions = paper.load_positions(self.data_dir, account)
                 orders = paper.load_orders(self.data_dir, account)
-                if any(p["qty"] > 0 for p in positions.values()) or any(
-                    o["status"] == "pending" for o in orders
-                ):
-                    raise ValueError("为避免混用策略，请使用没有持仓和待成交委托的独立账户")
+                snapshot = preview["snapshot"]
+                if any(o["status"] == "pending" for o in orders):
+                    raise ValueError("账户仍有待成交委托，请等待成交或撤销后再重新绑定")
+                has_positions = any(p["qty"] > 0 for p in positions.values())
+                same_strategy = bool(
+                    old and old["snapshot"]["strategy_id"] == snapshot["strategy_id"]
+                )
+                if has_positions and not same_strategy:
+                    raise ValueError(
+                        "账户已有持仓，仅支持同一策略重新绑定；更换策略请使用独立空账户"
+                    )
+                if has_positions and snapshot["symbols"] != old["snapshot"]["symbols"]:
+                    raise ValueError("已有持仓时不能改变股票池，请使用独立空账户重新绑定")
                 if any(not str(o.get("source", "")).startswith(PREFIX) for o in orders):
                     raise ValueError("账户存在其他来源的历史委托，请新建独立账户绑定")
                 legacy = paper_auto.load_auto_rules(self.data_dir, account, enabled_only=True)
                 if legacy and not disable_legacy:
                     raise ValueError("存在启用的旧跟单规则，请确认停用后再绑定")
-                snapshot = preview["snapshot"]
                 # 已有账务不修改；仅允许首次空账户同步成本参数。
                 if orders and any(acc[k] != v for k, v in snapshot["fees"].items()):
                     raise ValueError("账户已有成交记录且费用与新快照不同，请新建账户")
@@ -270,11 +282,11 @@ class ExecutionService:
                         overrides_map={snapshot["strategy_id"]: snapshot["overrides"]},
                     )
                     if context.current is None or context.current.is_empty():
-                        raise ValueError("当日日线数据为空")
+                        raise DataNotReady("当日日线数据为空")
                     if "raw_close" not in context.current.columns:
-                        raise ValueError("缺少不复权价格，不能下单")
+                        raise DataNotReady("缺少不复权价格，等待数据补齐")
                     if context.current["date"].min() != day or context.current["date"].max() != day:
-                        raise ValueError("策略输入日期不一致，已停止下单")
+                        raise DataNotReady("策略输入日期不一致，等待当日数据补齐")
                     if (
                         self.engine.get(snapshot["strategy_id"]).execution_backend
                         != "matrix_native"
@@ -305,6 +317,10 @@ class ExecutionService:
                 state.update(
                     last_bar=day.isoformat(), status="running", message="当日逐股信号已处理"
                 )
+        except DataNotReady as exc:
+            # 数据未就绪是暂时状态：保留绑定启用，下个 tick 自动重试。
+            logger.info("paper execution waiting for %s: %s", state["account"], exc)
+            state.update(enabled=True, status="waiting", message=str(exc))
         except Exception as exc:  # noqa: BLE001 — 金融计算无法确定时停用该绑定
             logger.warning(
                 "paper execution paused for %s: %s", state["account"], type(exc).__name__
@@ -444,7 +460,7 @@ class ExecutionService:
                     ):
                         continue
                 if _price(prices.get(symbol)) is None:
-                    raise ValueError("入场标的缺少有效不复权价格")
+                    raise DataNotReady(f"{symbol} 缺少有效不复权价格，等待数据补齐")
                 selected.append(symbol)
             # 核心回测以分数降序分配席位；无评分时稳定沿用引擎顺序。
             if any(not math.isfinite(result.scores.get(s, 0.0)) for s in selected):
@@ -455,7 +471,7 @@ class ExecutionService:
             if not selected:
                 return
             if any(_price(prices.get(s)) is None for s in held):
-                raise ValueError("持仓缺少当日价格，不能可靠计算敞口")
+                raise DataNotReady("持仓缺少当日价格，等待数据补齐后计算敞口")
             mv = sum(positions[s]["qty"] * prices[s] for s in held)
             equity = acc["cash"] + mv
             reserved = sum(
@@ -520,12 +536,12 @@ class ExecutionService:
             columns=["date", "symbol"],
         )
         if frame.is_empty():
-            raise ValueError("缺少持仓交易日数据，无法检查最大持有天数")
+            raise DataNotReady("缺少持仓交易日数据，等待数据补齐后检查最大持有天数")
         result = {}
         for symbol, start in starts.items():
             days = frame.filter(frame["symbol"] == symbol)["date"].unique().to_list()
             if not days:
-                raise ValueError("缺少持仓交易日数据，无法检查最大持有天数")
+                raise DataNotReady("缺少持仓交易日数据，等待数据补齐后检查最大持有天数")
             result[symbol] = sum(start < d.isoformat() <= day for d in days)
         return result
 

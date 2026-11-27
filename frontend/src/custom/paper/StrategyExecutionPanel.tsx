@@ -52,7 +52,7 @@ function BindingDialog({ account, binding, onClose }: { account: string; binding
   return <Modal onClose={() => { if (!busy) onClose() }} closeOnBackdrop={!busy} ariaLabel="绑定策略参数快照" panelClassName="flex max-h-[88vh] w-[94vw] max-w-2xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-xl">
     <div className="min-h-0 space-y-4 overflow-y-auto p-5">
       <div className="flex items-center justify-between gap-3"><h3 className="text-sm font-semibold">{binding ? '重新绑定策略快照' : '绑定策略参数快照'}</h3><button className={button} onClick={onClose} disabled={busy} aria-label="关闭"><X className="h-4 w-4" /></button></div>
-      <p className="text-[11px] leading-relaxed text-muted">使用独立、无持仓和待成交委托的账户。买卖点从策略逐股执行结果读取；参数冻结后，策略库调参不会改变本账户。</p>
+      <p className="text-[11px] leading-relaxed text-muted">首次绑定请使用无持仓、无待成交委托的独立账户。已有持仓时仅支持同一策略重新绑定：新快照会继续管理现有持仓并清空旧的出场/风控意图，请先核对；更换策略请使用独立空账户。</p>
       <label className="block text-xs text-muted">参数来源<select aria-label="参数来源" className={input} value={kind} disabled={busy} onChange={e => { setKind(e.target.value as typeof kind); setId(''); reset() }}>
         <option value="candidate">已保存的回测候选</option><option value="strategy">当前策略配置</option><option value="report">回测结果 / 配置 JSON</option>
       </select></label>
@@ -107,7 +107,7 @@ export function StrategyExecutionPanel({ account }: { account: string }) {
       <p className="text-[10px] leading-relaxed text-muted">请勿在本账户手动下单或启用旧规则；检测到其他来源委托会暂停跟单。暂停不撤销已有委托，请在订单列表处理。</p>
       <details><summary className="cursor-pointer text-xs text-muted">最近执行记录 ({binding.events.length})</summary><div className="mt-2 max-h-44 space-y-2 overflow-y-auto text-[10px] text-muted">{!binding.events.length && <div>暂无委托决策</div>}{binding.events.map((e, i) => <div key={`${e.at}-${i}`} className="break-words">{e.at.slice(5, 19).replace('T', ' ')} · {e.symbol} · {e.side === 'buy' ? '买入' : '卖出'} · {reasonLabels[e.reason] || e.reason} · {e.message}</div>)}</div></details>
     </>}
-    {toggle.isError && <p role="alert" className="text-xs text-danger">{toggle.error.message}</p>}
+    {toggle.isError && <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-danger"><span>{toggle.error.message}</span>{/策略定义已变更|依赖已变更|重新预览/.test(toggle.error.message) && <button className={button} onClick={() => setOpen(true)}>重新绑定</button>}</div>}
     {open && <BindingDialog key={account} account={account} binding={binding ?? null} onClose={() => setOpen(false)} />}
   </section>
 }

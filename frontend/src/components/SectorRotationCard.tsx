@@ -22,6 +22,7 @@ import { api, type SectorRotationSector } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useChartTheme } from '@/lib/theme'
 import { cn } from '@/lib/cn'
+import { joinSources } from '@/lib/source-labels'
 import { toast } from '@/components/Toast'
 import { CORE_INDEXES } from '@/components/Layout'
 
@@ -1004,6 +1005,16 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   }
 
   const latest = data?.timeline?.[data.timeline.length - 1]
+  // 板块成分来源: 后端按实际读取的扩展表 pull.url 反查 (同花顺/自有源), 不写死。
+  // 存在识别不出上游的扩展表时用「等扩展表」兜底, 不把多源合并说成单一来源。
+  const memberSources = data?.sources ?? []
+  const namedSources = [...new Set(
+    memberSources.map(item => item.upstream).filter((label): label is string => !!label),
+  )]
+  const hasUnnamedSource = memberSources.some(item => !item.upstream)
+  const memberSource = namedSources.length
+    ? `${joinSources(namedSources)}${hasUnnamedSource ? ' 等扩展表' : ''}`
+    : '扩展数据'
   const heatHeight = Math.max(180, heatRows * HEAT_ROW_HEIGHT + 62)
   // 左列是否渲染 (走势线无板块 / 热力图无行时缺位, 右列全宽补上)
   const showLeftChart = displayMode === 'heatmap' ? heatRows > 0 : displayNames.length > 0
@@ -1429,7 +1440,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
           })()}
           <div className="mt-1.5 flex items-center gap-1.5 text-[9px] text-muted">
             <Database className="h-3 w-3" />
-            {`${data.member_count} 个${dimLabel} · ${data.bucket_minutes}分钟桶 · 基准 ${data.basis === 'prev_close' ? '昨收' : data.basis === 'first_close' ? '今开' : '混合'}`}
+            {`成分 ${memberSource} · ${data.member_count} 个${dimLabel} · ${data.bucket_minutes}分钟桶 · 基准 ${data.basis === 'prev_close' ? '昨收' : data.basis === 'first_close' ? '今开' : '混合'}`}
             {data.flow_available ? ` · 资金流 ${data.flow_field}` : ' · 未启用资金流'}
             <span className="ml-auto">
               {rowsMode === 'custom'

@@ -714,3 +714,10 @@ def test_physical_boundary_value_kept(tmp_path):
     sectors = {item["name"]: item for item in result["sectors"]}
     # A 题材 = (+30% + -30%) / 2 = 0
     assert sectors["A题材"]["pct_now"] == pytest.approx(0.0, abs=1e-4)
+
+
+def test_member_sources_reported(repo):
+    """板块成分来源随扩展表返回: 页面据此标注"成分来源", 不写死同花顺。"""
+    result = sector_rotation.build_sector_rotation(repo, kind="concept", bucket_minutes=5)
+    assert result["status"] == "ok"
+    assert result["sources"] == [{"id": "ext_gn", "label": "测试概念", "upstream": None}]

@@ -117,7 +117,8 @@ def _concept_preset() -> ExtConfig:
 def _industry_preset() -> ExtConfig:
     """扩展行业 (ext_hy_ths)。
 
-    fuyao 为扁平板块清单, 无一/二/三级层级路径, 单级粒度。
+    fuyao 行业名为「一级-二级」两段拼接 (如 专用设备-能源及重型设备),
+    fanout 用 "-" 连接, 前端按 "-" 拆段做 1/2/3 级视图 (三级回退到最末段)。
     输出 schema: 股票代码 / 股票简称 / 所属同花顺行业 / symbol / code
     """
     return ExtConfig(
@@ -131,7 +132,7 @@ def _industry_preset() -> ExtConfig:
             ExtField("股票简称", "string", "股票简称"),
             ExtField("所属同花顺行业", "string", "所属同花顺行业"),
         ],
-        description="同花顺行业分类 (fuyao 同花顺指数接口, 扁平板块无层级; 拉取配方见「拉取」页)",
+        description="同花顺行业分类 (fuyao 同花顺指数接口, 行业名「一级-二级」两段; 拉取配方见「拉取」页)",
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(

@@ -22,7 +22,10 @@ from app.backtest.engine import BacktestEngine, history_load_start
 from app.backtest.fundamentals import (
     FUNDAMENTAL_FACTOR_NAMES,
     attach_fundamental_factors,
+    fundamental_tables,
     load_fundamental_snapshot,
+    load_fundamental_snapshots,
+    missing_hint,
 )
 from app.factors.registry import factor_calculation_order, factor_warmup_bars, get_factor
 from app.factors.registry import factor_columns_view as _factor_columns_view
@@ -213,10 +216,12 @@ class FactorBacktestService:
         if panel.is_empty():
             return self._error_result(config, run_id, t0, "无数据, 请检查日期范围或先运行盘后管道")
 
-        if config.factor_name in FUNDAMENTAL_FACTOR_NAMES and self._fundamentals_missing():
+        if config.factor_name in FUNDAMENTAL_FACTOR_NAMES and self._fundamentals_missing(
+            [config.factor_name]
+        ):
             return self._error_result(
                 config, run_id, t0,
-                "本地没有财务数据: 请先在数据页同步财务数据后再使用财务因子",
+                missing_hint([config.factor_name]),
             )
 
         trading_dates = self._global_trading_dates(config)
@@ -295,10 +300,13 @@ class FactorBacktestService:
         )
 
         metadata = {item["id"]: item for item in _factor_columns_view()}
-        fundamentals_missing = (
-            any(name in FUNDAMENTAL_FACTOR_NAMES for name in factor_names)
-            and self._fundamentals_missing()
-        )
+        # 逐因子判定来源表是否就绪: 财务因子看 metrics, 股东因子看 holder_metrics,
+        # 避免只有一张表时把另一类因子误判为可用 (或整批误报缺数据)。
+        fundamentals_ready = {
+            name: self._fundamentals_missing([name])
+            for name in factor_names
+            if name in FUNDAMENTAL_FACTOR_NAMES
+        }
         items: list[FactorBatchItem] = []
         for factor_name in factor_names:
             item_t0 = time.perf_counter()
@@ -317,13 +325,13 @@ class FactorBacktestService:
                 asset_type=config.asset_type,
             )
             meta = metadata.get(factor_name, {})
-            if factor_name in FUNDAMENTAL_FACTOR_NAMES and fundamentals_missing:
+            if factor_name in FUNDAMENTAL_FACTOR_NAMES and fundamentals_ready.get(factor_name):
                 items.append(FactorBatchItem(
                     factor_name=factor_name,
                     label=str(meta.get("label", factor_name)),
                     group=str(meta.get("group", "")),
                     elapsed_ms=round((time.perf_counter() - item_t0) * 1000, 1),
-                    error="本地没有财务数据: 请先在数据页同步财务数据后再使用财务因子",
+                    error=missing_hint([factor_name]),
                 ))
                 continue
             try:
@@ -403,8 +411,12 @@ class FactorBacktestService:
         loader = getattr(self.engine, "data_generation", None)
         return loader(asset_type) if callable(loader) else None
 
-    def _fundamentals_missing(self) -> bool:
-        return load_fundamental_snapshot(self._fundamentals_data_dir()) is None
+    def _fundamentals_missing(self, factor_names: Any = ()) -> bool:
+        tables = fundamental_tables(factor_names) if factor_names else {"metrics"}
+        data_dir = self._fundamentals_data_dir()
+        return not any(
+            load_fundamental_snapshot(data_dir, table) is not None for table in tables
+        )
 
     def _fundamentals_data_dir(self) -> Path | None:
         repo = getattr(self.engine, "repo", None)
@@ -454,10 +466,12 @@ class FactorBacktestService:
 
         fundamental_names = sorted(required & FUNDAMENTAL_FACTOR_NAMES)
         if fundamental_names:
-            # 点时财务因子: 公告日门控, 无数据标的保持 null (不参与该日截面)。
+            # 点时财务/股东因子: 公告日门控, 无数据标的保持 null (不参与该日截面)。
             panel = attach_fundamental_factors(
                 panel,
-                load_fundamental_snapshot(self._fundamentals_data_dir()),
+                load_fundamental_snapshots(
+                    self._fundamentals_data_dir(), fundamental_tables(fundamental_names),
+                ),
                 fundamental_names,
             )
         missing = set(factor_names) - set(panel.columns)

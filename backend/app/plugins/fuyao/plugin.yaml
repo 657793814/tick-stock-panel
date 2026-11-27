@@ -3,7 +3,7 @@
 # 需在 .env 或环境变量配置 FUYAO_API_KEY, 未配置时插件灰显不可切换。
 
 name: fuyao
-display_name: "fuyao"
+display_name: "同花顺"
 runtime: none
 entry: app.plugins.fuyao.provider:FuyaoProvider
 check: app.plugins.fuyao.provider:availability

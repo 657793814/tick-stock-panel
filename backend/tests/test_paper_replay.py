@@ -215,3 +215,42 @@ def test_replay_api_contract(tmp_path: Path):
     assert client.get("/api/paper/replay", params={"symbol": "600519.SH", "start": "2026-02-01", "end": "2026-01-01"}).status_code == 400
     assert client.get("/api/paper/replay", params={"symbol": "000001.SZ"}).status_code == 404
     assert client.get("/api/paper/replay", params={"symbol": "600519.SH", "account": "missing"}).status_code == 404
+
+def test_replay_round_builds_open_and_close_markers(tmp_path: Path):
+    _seed_round_trip(tmp_path)
+    data = paper.replay_round(tmp_path, "600519.SH", "2026-01-02", "2026-01-05")
+    assert data is not None
+    assert data["round"]["open_date"] == "2026-01-02"
+    assert data["round"]["close_date"] == "2026-01-05"
+    assert data["round"]["qty"] == 100
+    assert len(data["markers"]) == 2
+    assert [m["kind"] for m in data["markers"]] == ["buy", "sell"]
+    assert [m["label"] for m in data["markers"]] == ["B", "S"]
+    assert data["markers"][0]["above"] is False
+    assert data["markers"][1]["above"] is True
+    assert data["markers"][0]["price"] == 10.0
+    assert data["markers"][1]["price"] == 12.0
+    assert data["round_summary"]["open_price"] == 10.0
+    assert data["round_summary"]["close_price"] == 12.0
+
+
+def test_replay_round_no_match_returns_none(tmp_path: Path):
+    _seed_round_trip(tmp_path)
+    assert paper.replay_round(tmp_path, "600519.SH", "2026-01-02", "2026-01-06") is None
+    assert paper.replay_round(tmp_path, "600519.SH", "2026-01-06", "2026-01-07") is None
+
+
+def test_replay_round_api_contract(tmp_path: Path):
+    _seed_round_trip(tmp_path)
+    client = _client(tmp_path)
+
+    r = client.get("/api/paper/replay/round", params={"symbol": "600519", "open_date": "2026-01-02", "close_date": "2026-01-05"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["markers"][0]["kind"] == "buy"
+    assert body["markers"][1]["kind"] == "sell"
+    assert body["round_summary"]["qty"] == 100
+
+    assert client.get("/api/paper/replay/round", params={"symbol": "600519", "open_date": "2026-01-05", "close_date": "2026-01-02"}).status_code == 400
+    assert client.get("/api/paper/replay/round", params={"symbol": "000001.SZ", "open_date": "2026-01-02", "close_date": "2026-01-05"}).status_code == 404
+    assert client.get("/api/paper/replay/round", params={"symbol": "600519.SH", "open_date": "2026-01-02", "close_date": "2026-01-05", "account": "missing"}).status_code == 404

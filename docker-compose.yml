@@ -49,6 +49,10 @@ services:
   redis:
     image: ${REDIS_IMAGE:-redis:7-alpine}
     container_name: TickFlow_Redis
+    # 仅映射回环地址供宿主机调试(redis-cli / 脚本直连); 不对外网暴露缓存。
+    # app 容器仍走内部网络 redis://redis:6379/0, 不依赖这个映射。
+    ports:
+      - "127.0.0.1:6379:6379"
     # 纯缓存, 不落盘; 限制内存后由 LRU 淘汰, 避免和后端争抢 Docker VM 内存。
     command: redis-server --save "" --appendonly no --maxmemory ${REDIS_MAXMEMORY:-192mb} --maxmemory-policy allkeys-lru
     restart: unless-stopped

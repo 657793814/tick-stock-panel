@@ -312,6 +312,69 @@ def delete_account(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID, *, forc
         return {"holdings": holdings, "pending_orders": pending}, None
 
 
+def batch_delete_accounts(
+    data_dir: Path,
+    account_ids: list[str],
+    *,
+    force: bool = False,
+) -> dict:
+    """批量删除账户及其全部数据 (不可恢复)。
+
+    fail-closed: 任一账户仍有持仓/待成交订单且 force=False 时, 整批不落盘删除
+    (不留半删状态), 拒绝明细回传调用方。全部账户校验通过才一次性删除各账户目录。
+    账户 id 先校验格式, 再逐个校验存在性与可删性; 目录删除限定在 accounts/{id}
+    (id 已过 _ACCOUNT_ID_RE, 无路径穿越面)。
+
+    返回 {"deleted":[{id,holdings,pending_orders}], "refused":[{id,reason}], ...}。
+    """
+    with PAPER_LOCK:
+        ids: list[str] = []
+        for aid in account_ids:
+            try:
+                ids.append(validate_account_id(aid))
+            except ValueError as e:
+                raise ValueError(str(e)) from None
+        if not ids:
+            raise ValueError("至少要提供一个账户 id")
+        if len(ids) > 60:
+            raise ValueError("单次最多删除 60 个账户")
+
+        # 逐个校验存在性与可删性: 先整体判定再落盘, 任一拒绝则整批不删
+        deleted: list[dict] = []
+        refused: list[dict] = []
+        for aid in ids:
+            if get_account(data_dir, aid) is None:
+                refused.append({"id": aid, "reason": "账户不存在"})
+                continue
+            positions = load_positions(data_dir, aid)
+            holdings = sum(1 for p in positions.values() if p["qty"] > 0)
+            pending = sum(1 for o in load_orders(data_dir, aid) if o["status"] == "pending")
+            if (holdings or pending) and not force:
+                detail = " 与 ".join(
+                    s for s in (
+                        f"{holdings} 个持仓标的" if holdings else "",
+                        f"{pending} 张待成交订单" if pending else "",
+                    ) if s
+                )
+                refused.append({"id": aid, "reason": f"账户仍有 {detail}, 确认删除需 force=true"})
+                continue
+            deleted.append({"id": aid, "holdings": holdings, "pending_orders": pending})
+
+        # 全部通过 → 一次性删除各账户目录 (目录级 rmtree)
+        stats = {
+            "deleted": deleted,
+            "refused": refused,
+            "total": len(ids),
+            "total_deleted": len(deleted),
+            "total_refused": len(refused),
+        }
+        for item in deleted:
+            root = accounts_base(data_dir) / validate_account_id(item["id"])
+            if root.exists():
+                shutil.rmtree(root)
+        return stats
+
+
 # ── 费用 (纯函数) ───────────────────────────────────────
 def apply_slippage(price: float, side: str, slippage_bps: float) -> float:
     """买入向上滑、卖出向下滑 (对成交价不利方向)。"""
@@ -1733,6 +1796,109 @@ def replay(
         },
         "total_fills": total_fills,
         "truncated": truncated,
+    }
+
+
+def replay_round(
+    data_dir: Path,
+    symbol: str,
+    open_date: str | None,
+    close_date: str | None,
+    account_id: str = DEFAULT_ACCOUNT_ID,
+    *,
+    names: dict[str, str] | None = None,
+) -> dict | None:
+    """按 FIFO 回合构建回合级 K 线回放: 开仓日买入标记 + 平仓日卖出标记。
+
+    与单标的逐笔回放不同, 这里把「开→平」配成一对买卖标记, 展示一个完整回合的买卖。
+    返回 None 表示该账户无此 symbol 的该回合。
+    """
+    symbol = normalize_symbol(symbol)
+    all_fills = load_fills(data_dir, account_id)
+    if not any(
+        f.get("symbol") == symbol and f.get("kind", "fill") == "fill" for f in all_fills
+    ):
+        return None
+    rounds = round_trips(data_dir, account_id)
+    matched = [
+        r
+        for r in rounds
+        if r["symbol"] == symbol
+        and str(r.get("open_date", "")) == str(open_date)
+        and str(r.get("close_date", "")) == str(close_date)
+    ]
+    if not matched:
+        return None
+    r = matched[0]
+
+    def _avg_price(day: str, side: str) -> float | None:
+        sub = [
+            f
+            for f in all_fills
+            if f.get("kind", "fill") == "fill"
+            and f.get("symbol") == symbol
+            and str(f.get("date", "")) == day
+            and f.get("side") == side
+        ]
+        if not sub:
+            return None
+        return round(sum(float(f.get("price") or 0) for f in sub) / len(sub), 3)
+
+    open_price = _avg_price(str(r.get("open_date", "")), "buy")
+    close_price = _avg_price(str(r.get("close_date", "")), "sell")
+
+    return {
+        "account": account_id,
+        "account_name": (get_account(data_dir, account_id) or {}).get("name", account_id),
+        "symbol": symbol,
+        "name": (names or {}).get(symbol) or symbol,
+        "asset_type": "stock",
+        "market": market_of(symbol),
+        "start": str(r.get("open_date", "")),
+        "close_date": str(r.get("close_date", "")),
+        "round": {
+            "symbol": symbol,
+            "open_date": str(r.get("open_date", "")),
+            "close_date": str(r.get("close_date", "")),
+            "qty": r["qty"],
+            "pnl": r["pnl"],
+            "pnl_pct": r["pnl_pct"],
+            "holding_days": r["holding_days"],
+        },
+        "round_summary": {
+            "open_date": str(r.get("open_date", "")),
+            "close_date": str(r.get("close_date", "")),
+            "qty": r["qty"],
+            "pnl": r["pnl"],
+            "pnl_pct": r["pnl_pct"],
+            "holding_days": r["holding_days"],
+            "open_price": open_price,
+            "close_price": close_price,
+        },
+        "markers": [
+            {
+                "date": str(r.get("open_date", "")),
+                "kind": "buy",
+                "label": "B",
+                "above": False,
+                "price": open_price,
+                "qty": r["qty"],
+                "side": "buy",
+                "reason": "round_open",
+                "reason_label": "回合买入",
+            },
+            {
+                "date": str(r.get("close_date", "")),
+                "kind": "sell",
+                "label": "S",
+                "above": True,
+                "price": close_price,
+                "qty": r["qty"],
+                "side": "sell",
+                "reason": "round_close",
+                "reason_label": "回合卖出",
+            },
+        ],
     }
 
 

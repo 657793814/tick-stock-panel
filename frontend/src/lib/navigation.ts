@@ -11,6 +11,8 @@ export type NavigationEntry = {
   id: string; to: string; label: string; icon: (props: BrandIconProps) => ReactNode
   type: 'builtin' | 'analysis' | 'extension'
   visible: boolean; arch?: 'core' | 'ext'; badge?: string; extensionId?: string
+  /** 显式默认位置(可用小数插在两项之间); 未保存导航布局时按它插入 */
+  order?: number
 }
 
 export const CORE_NAVIGATION: NavigationEntry[] = [
@@ -36,7 +38,7 @@ export function getNavigationEntries(menus: readonly AnalysisMenu[] = []): Navig
     ...getFrontendExtensionNavigation().map(item => ({
       id: item.route.path, to: item.route.path, label: item.label, icon: item.icon,
       type: 'extension' as const, visible: true, arch: 'ext' as const,
-      badge: item.badge, extensionId: item.extensionId,
+      badge: item.badge, extensionId: item.extensionId, order: item.order,
     })),
   ]
   return [...new Map(entries.map(x => [x.id, x])).values()]

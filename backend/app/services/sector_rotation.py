@@ -36,6 +36,7 @@ from typing import Any
 import polars as pl
 
 from app.market_time import trading_minutes_elapsed_from_dt
+from app.services.dimension_source import dimension_sources
 from app.services.ext_data import ExtConfigStore
 from app.services.rps_rotation import _load_concept_map_df
 
@@ -427,7 +428,10 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
 
     map_df, member_count = _load_concept_map_df(repo, kind)
     if map_df.is_empty() or member_count == 0:
-        return {"status": "no_data", "reason": "members_missing", "date": target, "kind": kind}
+        return {
+            "status": "no_data", "reason": "members_missing", "date": target, "kind": kind,
+            "sources": dimension_sources(data_dir, kind),
+        }
 
     pcts, basis, has_amount = _minute_pcts(minute_dir, target)
     if pcts is None:
@@ -651,6 +655,8 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
         "flow_available": flow_available,
         "bucket_minutes": bucket_minutes,
         "member_count": member_count,
+        # 板块成分实际来自哪些扩展表/上游 (同花顺或用户自有源), 页面如实标注
+        "sources": dimension_sources(data_dir, kind),
         "default_exclude_sectors": list(_DEFAULT_EXCLUDE_SECTORS),
         "max_auto_members": _MAX_AUTO_MEMBERS,
         "as_of": per_bucket[-1]["bucket"].strftime("%H:%M"),

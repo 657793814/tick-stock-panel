@@ -651,6 +651,9 @@ class DataProvidersIn(BaseModel):
     depth5_data_provider: str | None = None
     realtime_data_provider: str | None = None
     financial_data_provider: str | None = None
+    moneyflow_data_provider: str | None = None
+    lhb_data_provider: str | None = None
+    margin_data_provider: str | None = None
 
 
 class PluginKeyIn(BaseModel):
@@ -851,6 +854,9 @@ def get_capability_matrix() -> dict:
             "depth5_data_provider": preferences.get_depth5_data_provider(),
             "adj_factor_provider": preferences.get_adj_factor_provider(),
             "financial_data_provider": preferences.get_financial_provider(),
+            "moneyflow_data_provider": preferences.get_moneyflow_data_provider(),
+            "lhb_data_provider": preferences.get_lhb_data_provider(),
+            "margin_data_provider": preferences.get_margin_data_provider(),
         },
         tickflow_tier=policy.base_tier_name(),
     )
@@ -1088,6 +1094,9 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
         "depth5_data_provider": preferences.get_depth5_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
+        "moneyflow_data_provider": preferences.get_moneyflow_data_provider(),
+        "lhb_data_provider": preferences.get_lhb_data_provider(),
+        "margin_data_provider": preferences.get_margin_data_provider(),
     }
 
 

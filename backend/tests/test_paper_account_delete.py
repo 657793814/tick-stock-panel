@@ -86,6 +86,58 @@ def test_delete_with_holding_requires_force(client: TestClient, tmp_path: Path):
     assert client.delete("/api/paper/account?account=del_me&force=true").status_code == 200
 
 
+def test_batch_delete_empty_accounts(client: TestClient, tmp_path: Path):
+    """批量删除: 空账户整批删除成功, 目录消失、榜单刷新。"""
+    _mk_account(client, "b1")
+    _mk_account(client, "b2")
+    r = client.post("/api/paper/accounts/batch-delete", json={"account_ids": ["b1", "b2"], "force": True})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert not (tmp_path / "paper" / "accounts" / "b1").exists()
+    assert not (tmp_path / "paper" / "accounts" / "b2").exists()
+    ids = {a["id"] for a in client.get("/api/paper/accounts").json()["accounts"]}
+    assert "b1" not in ids and "b2" not in ids
+
+
+def test_batch_delete_rejects_invalid_id(client: TestClient):
+    r = client.post("/api/paper/accounts/batch-delete", json={"account_ids": ["../escape"], "force": True})
+    assert r.status_code == 400
+
+
+def test_batch_delete_with_holdings_requires_force(client: TestClient, tmp_path: Path):
+    """有持仓的账户: 非 force 整批拒绝不落盘, force=true 才强删 (fail-closed)。"""
+    _mk_account(client, "bh")
+    fills = tmp_path / "paper" / "accounts" / "bh" / "fills.jsonl"
+    fills.parent.mkdir(parents=True, exist_ok=True)
+    fill = {
+        "seq": 1, "ts": "2026-10-14T10:00:00+08:00", "date": "2026-10-13",
+        "order_id": "o1", "symbol": "600519.SH", "asset_type": "stock",
+        "side": "buy", "qty": 100, "price": 1500.0, "fee": 5.0, "kind": "fill",
+    }
+    fills.write_text(json.dumps(fill, ensure_ascii=False) + "\n", encoding="utf-8")
+    client.post("/api/paper/rebuild?account=bh")
+
+    r = client.post("/api/paper/accounts/batch-delete", json={"account_ids": ["bh"], "force": False})
+    assert r.status_code == 200
+    assert r.json()["total_refused"] == 1
+    assert "force" in r.json()["refused"][0]["reason"]
+    assert (tmp_path / "paper" / "accounts" / "bh" / "account.json").exists()  # 拒绝时不动数据
+
+    r = client.post("/api/paper/accounts/batch-delete", json={"account_ids": ["bh"], "force": True})
+    assert r.status_code == 200 and r.json()["total_deleted"] == 1
+    assert not (tmp_path / "paper" / "accounts" / "bh").exists()
+
+
+def test_batch_delete_missing_account_in_refused(client: TestClient, tmp_path: Path):
+    """含不存在账户: 整批不删, 存在于拒绝明细中。"""
+    _mk_account(client, "ok")
+    r = client.post("/api/paper/accounts/batch-delete", json={"account_ids": ["ok", "nope"], "force": True})
+    assert r.status_code == 200
+    assert r.json()["total_deleted"] == 1
+    assert r.json()["total_refused"] == 1
+    assert r.json()["refused"][0]["id"] == "nope"
+    assert not (tmp_path / "paper" / "accounts" / "ok" / "account.json").exists()  # 存在的账户按可删规则删掉, 不存在的账户拒绝
+
+
 def test_rounds_endpoint_empty_and_filled(client: TestClient, tmp_path: Path):
     _mk_account(client)
     assert client.get("/api/paper/rounds?account=del_me").json() == {"rounds": []}

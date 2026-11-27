@@ -1,6 +1,6 @@
 import type { CapabilityRoute, ProviderField } from '@/lib/api'
 
-/** 全部可路由偏好字段的默认生效源。 */
+/** 全部可路由偏好字段的默认生效源。事件类能力 (tf_provides=False) 默认 eastmoney。 */
 export const DEFAULT_ROUTING: Record<ProviderField, string> = {
   daily_data_provider: 'tickflow',
   adj_factor_provider: 'tickflow',
@@ -9,6 +9,9 @@ export const DEFAULT_ROUTING: Record<ProviderField, string> = {
   depth5_data_provider: 'tickflow',
   realtime_data_provider: 'tickflow',
   financial_data_provider: 'tickflow',
+  moneyflow_data_provider: 'eastmoney',
+  lhb_data_provider: 'eastmoney',
+  margin_data_provider: 'eastmoney',
 }
 
 /**

@@ -916,10 +916,12 @@ def get_minute_batch(request: Request, body: dict):
     repo = request.app.state.repo
     capset = request.app.state.capabilities
 
-    # 权限守卫: 分钟K批量补拉是 Pro+ 能力; 但本地读不消耗 provider 配额 ——
-    # 全量分钟服务健康 (正持续写本地分区) 时放行, 避免"数据在盘上却 403"。
+    # 权限守卫: 分钟K批量补拉是 TickFlow Pro+ 能力; 但以下两种情况不消耗其配额 ——
+    # 1) 分钟源已切换到声明 minute 数据集的插件 (腾讯/TdxQuant 等), 由 _minute_allowed
+    #    统一判定: TickFlow 看档位, 插件看 dataset 声明与可用性;
+    # 2) 全量分钟服务健康 (正持续写本地分区), 本地读不消耗 provider 配额。
     # is_healthy() 纯内存 O(1), 不加热路径成本。
-    if not capset.has(Cap.KLINE_MINUTE_BATCH):
+    if not _minute_allowed(capset):
         svc = getattr(request.app.state, "minute_refresh", None)
         if svc is None or not svc.is_healthy():
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (kline.minute.batch)")
